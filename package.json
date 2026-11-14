@@ -38,6 +38,11 @@
       "import": "./dist/debug-menu.mjs",
       "require": "./dist/debug-menu.js"
     },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.mjs",
+      "require": "./dist/config.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -66,6 +71,7 @@
   "homepage": "https://github.com/jayjaybeeuk/swaggerizer#readme",
   "dependencies": {
     "@apidevtools/swagger-parser": "^13.1.0",
+    "jiti": "^2.7.0",
     "orval": "^8.47.0",
     "swagger2openapi": "^7.0.8",
     "yargs": "^18.2.0"

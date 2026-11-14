@@ -54,6 +54,11 @@ export interface CatalogueExample {
   name: string;
   summary?: string;
   value: unknown;
+  /** Overrides the response's content type for this example (scenario overlays). */
+  contentType?: string;
+  headers?: Record<string, string>;
+  /** True when the example came from a scenario overlay rather than the spec. */
+  overlay?: boolean;
 }
 
 /** One response code declared for an operation. */
@@ -119,6 +124,8 @@ export interface SwaggerizerManifest {
   operations: CatalogueOperation[];
   /** Scenario defaults saved from the admin page when the code was generated. */
   scenarios?: ScenarioMap;
+  /** Request path prefixes that are rewritten before matching, e.g. `{ "/bff/v4/": "/v4/" }`. */
+  aliases?: Record<string, string>;
 }
 
 export interface SpecSummary {
@@ -134,12 +141,17 @@ export interface SpecSummary {
   error?: string;
   warnings: string[];
   basePaths: string[];
+  aliases?: Record<string, string>;
+  /** Where the spec was loaded from when it is not a local file. */
+  source?: string;
   proxyTarget?: string;
   operationCount: number;
 }
 
 export interface SwaggerizerState {
   endpoint: string;
+  defaultDelay?: number;
+  fallback?: string;
   specs: SpecSummary[];
   operations: OperationState[];
   lastReload?: string;

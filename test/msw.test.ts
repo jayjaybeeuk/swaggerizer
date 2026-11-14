@@ -157,3 +157,46 @@ describe("MSW runtime synced with a Swaggerizer server", () => {
     assert.equal(log[log.length - 1].example, "emptyList");
   });
 });
+
+describe("MSW runtime with config features", () => {
+  const msw = setupServer();
+  after(() => msw.close());
+
+  test("aliases, overlays, custom handlers and the default delay work in MSW too", async () => {
+    const { loadConfig, applyOverlays } = await import("../src/index");
+    const config = (await loadConfig(path.join(__dirname, "fixtures", "bff", "swaggerizer.config.ts")))!.config;
+    const bff = config.specs.bff;
+    const spec = await analyseSpecFile(bff.file!, "bff");
+    const manifest: SwaggerizerManifest = {
+      specId: "bff",
+      basePaths: spec.basePaths,
+      operations: applyOverlays(spec.operations, bff.scenarios),
+      aliases: bff.aliases
+    };
+    const mocks = createSwaggerizerMocks({ manifests: [manifest], handlers: bff.handlers, storageKey: false, delay: 80 });
+    msw.use(...mocks.handlers);
+    msw.listen({ onUnhandledRequest: "error" });
+
+    let started = Date.now();
+    const aliased = await call("https://gateway.test/banking/bff/v4/businesses/b1/rewards");
+    assert.ok(Date.now() - started >= 70, "default delay");
+    assert.equal(aliased.headers.get("x-swaggerizer-scenario"), "200:populated");
+    assert.equal(aliased.json.totals[0].cashback, 681.38);
+    assert.equal((await call("https://gateway.test/v4/banking/businesses/b1/rewards")).json.totals[0].cashback, 681.38);
+
+    await mocks.select({ method: "get", route: "/banking/businesses/{businessId}/rewards", example: "empty", delay: 0 });
+    started = Date.now();
+    assert.deepEqual((await call("https://gateway.test/banking/bff/v4/businesses/b1/rewards")).json.totals, []);
+    assert.ok(Date.now() - started < 70, "explicit 0 delay");
+
+    const created = await call("https://gateway.test/banking/bff/v4/businesses/b9/expenses", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "e1" })
+    });
+    assert.equal(created.status, 201);
+    assert.deepEqual((await call("https://gateway.test/v4/banking/businesses/b9/expenses")).json, [{ id: "e1" }], "params come through aliased and canonical routes alike");
+    await mocks.reset();
+    assert.deepEqual((await call("https://gateway.test/v4/banking/businesses/b9/expenses")).json, [], "reset clears the store");
+  });
+});

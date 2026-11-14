@@ -31,6 +31,8 @@ export interface Variant {
   kind: "example" | "generated" | "empty";
   value: unknown;
   response: CatalogueResponse;
+  contentType?: string;
+  headers?: Record<string, string>;
 }
 
 /** Every selectable (code, example) pair for an operation. */
@@ -39,7 +41,15 @@ export function variantsOf(op: CatalogueOperation): Variant[] {
   for (const response of op.responses) {
     if (response.examples.length > 0) {
       for (const ex of response.examples) {
-        list.push({ code: response.code, example: ex.name, kind: "example", value: ex.value, response });
+        list.push({
+          code: response.code,
+          example: ex.name,
+          kind: "example",
+          value: ex.value,
+          response,
+          ...(ex.contentType ? { contentType: ex.contentType } : {}),
+          ...(ex.headers ? { headers: ex.headers } : {})
+        });
       }
     } else if (response.hasBody) {
       list.push({ code: response.code, example: GENERATED, kind: "generated", value: response.generated, response });
@@ -70,7 +80,12 @@ export function effectiveExample(op: CatalogueOperation, code: string, requested
  * enabled specs declare the same method + route the first one serves it and the others are
  * reported as shadowed.
  */
-export function buildOperationStates(specs: PlannerSpec[], scenarios: ScenarioMap): OperationState[] {
+export interface PlannerOptions {
+  /** Latency applied to every operation that has no delay of its own, in ms. */
+  defaultDelay?: number;
+}
+
+export function buildOperationStates(specs: PlannerSpec[], scenarios: ScenarioMap, options: PlannerOptions = {}): OperationState[] {
   const servedBy = new Map<string, string>();
   const states: OperationState[] = [];
   for (const spec of specs) {
@@ -86,21 +101,22 @@ export function buildOperationStates(specs: PlannerSpec[], scenarios: ScenarioMa
           servedBy.set(op.key, spec.id);
         }
       }
-      states.push({ ...stateOf(op, scenarios[op.key]), active, ...(shadowedBy ? { shadowedBy } : {}) });
+      states.push({ ...stateOf(op, scenarios[op.key], options), active, ...(shadowedBy ? { shadowedBy } : {}) });
     }
   }
   return states;
 }
 
-export function stateOf(op: CatalogueOperation, scenario: Scenario = {}): OperationState {
+export function stateOf(op: CatalogueOperation, scenario: Scenario = {}, options: PlannerOptions = {}): OperationState {
   const response = scenario.code ? findResponse(op, scenario.code) : undefined;
   const selectedCode = response ? response.code : op.defaultCode;
   const selectedExample = effectiveExample(op, selectedCode, scenario.example);
   const mode: ScenarioMode = scenario.mode && MODES.includes(scenario.mode) ? scenario.mode : "mock";
-  const delay = Math.max(0, Number(scenario.delay) || 0);
+  const defaultDelay = Math.max(0, Number(options.defaultDelay) || 0);
+  const delay = scenario.delay === undefined ? defaultDelay : Math.max(0, Number(scenario.delay) || 0);
   const modified =
     mode !== "mock" ||
-    delay > 0 ||
+    delay !== defaultDelay ||
     selectedCode !== op.defaultCode ||
     selectedExample !== effectiveExample(op, op.defaultCode, op.defaultExample);
   return {
@@ -214,7 +230,8 @@ export function applySelection(op: CatalogueOperation, selection: Partial<Scenar
   }
 
   if (next.mode === "mock") delete next.mode;
-  if (!next.delay) delete next.delay;
+  // An explicit 0 is kept: it overrides a server-wide default delay.
+  if (next.delay === undefined) delete next.delay;
   return next;
 }
 
@@ -250,7 +267,8 @@ export function resolveResponse(op: OperationState, override?: Partial<Scenario>
   let state = op;
   if (override) {
     try {
-      state = { ...op, ...stateOf(op, applySelection(op, override, scenarioFromState(op))) };
+      const scenario = applySelection(op, override, scenarioFromState(op));
+      state = { ...op, ...stateOf(op, { delay: op.delay, ...scenario }) };
     } catch {
       // An override that does not fit this operation is ignored rather than failing the request.
     }
@@ -276,11 +294,12 @@ export function resolveResponse(op: OperationState, override?: Partial<Scenario>
     return { kind: "respond", status: 200, body: {}, contentType: "application/json", variant: EMPTY, code: "200", delay: state.delay };
   }
   const contentType =
-    variant.response.contentTypes.find(t => /json/i.test(t)) || variant.response.contentTypes[0];
+    variant.contentType || variant.response.contentTypes.find(t => /json/i.test(t)) || variant.response.contentTypes[0];
   return {
     kind: "respond",
     status: variant.response.status,
     contentType,
+    ...(variant.headers ? { headers: variant.headers } : {}),
     body: variant.kind === "empty" ? undefined : variant.value,
     variant: variant.example,
     code: variant.code,
@@ -294,7 +313,7 @@ export function scenarioFromState(op: OperationState): Scenario {
     example: op.selectedExample,
     ...(op.mode !== "mock" ? { mode: op.mode } : {}),
     ...(op.custom ? { custom: op.custom } : {}),
-    ...(op.delay ? { delay: op.delay } : {})
+    delay: op.delay
   };
 }
 
@@ -370,19 +389,39 @@ export function matchOperation<T extends Routable>(
   operations: T[],
   method: string,
   pathname: string,
-  basePaths: string[] = []
+  basePaths: string[] = [],
+  aliases: Record<string, string> = {}
 ): T | undefined {
   const m = method.toLowerCase();
   const candidates = operations.filter(op => op.active && op.method === m).sort(routeSpecificity);
-  const paths = [pathname];
-  for (const base of basePaths) {
-    if (base && (pathname === base || pathname.startsWith(base + "/"))) {
-      paths.push(pathname.slice(base.length) || "/");
+  return candidatePaths(pathname, basePaths, aliases)
+    .map(path => candidates.find(op => compileRoute(op.route).regex.test(path)))
+    .find(Boolean);
+}
+
+/** Replaces a matching alias prefix: `/online-banking/bff/v4/x` with `{ "/online-banking/bff/v4/": "/v4/online-banking/" }` → `/v4/online-banking/x`. */
+export function applyAliases(pathname: string, aliases: Record<string, string> = {}): string[] {
+  const out: string[] = [];
+  for (const [from, to] of Object.entries(aliases)) {
+    if (from && pathname.startsWith(from)) out.push(to + pathname.slice(from.length));
+  }
+  return out;
+}
+
+/** Every spelling of a request path worth matching: as-is, de-aliased, and with base paths stripped. */
+export function candidatePaths(pathname: string, basePaths: string[] = [], aliases: Record<string, string> = {}): string[] {
+  const paths = [pathname, ...applyAliases(pathname, aliases)];
+  for (const path of [...paths]) {
+    for (const base of basePaths) {
+      if (base && (path === base || path.startsWith(base + "/"))) paths.push(path.slice(base.length) || "/");
     }
   }
-  for (const path of paths) {
-    const found = candidates.find(op => compileRoute(op.route).regex.test(path));
-    if (found) return found;
-  }
-  return undefined;
+  return [...new Set(paths)];
+}
+
+/** The base path that prefixes `pathname` (after aliases), and the path relative to it. */
+export function relativeToBase(pathname: string, basePaths: string[] = [], aliases: Record<string, string> = {}): string {
+  const [aliased = pathname] = applyAliases(pathname, aliases);
+  const base = basePaths.find(b => aliased === b || aliased.startsWith(b + "/"));
+  return base ? aliased.slice(base.length) || "/" : aliased;
 }
