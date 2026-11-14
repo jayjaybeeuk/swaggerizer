@@ -46,7 +46,15 @@ export async function pull(options: PullOptions): Promise<PullResult> {
 
   for (const [id, spec] of entries) {
     try {
-      const response = await fetch(spec.source!, { headers: { Accept: "application/json, application/yaml;q=0.9, */*;q=0.5", ...(options.headers || {}) } });
+      const response = await fetch(spec.source!, {
+        headers: {
+          Accept: "application/json, application/yaml;q=0.9, */*;q=0.5",
+          ...(options.config.headers || {}),
+          ...(spec.headers || {}),
+          ...(options.headers || {})
+        },
+        signal: AbortSignal.timeout(30000)
+      });
       if (!response.ok) throw new Error(`${spec.source} answered ${response.status}`);
       const { text, ext } = normaliseSpecText(await response.text());
       const file = path.resolve(spec.file ?? path.join("specs", `${id}.${ext}`));

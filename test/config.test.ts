@@ -239,3 +239,101 @@ describe("pull", () => {
     }
   });
 });
+
+describe("hosted specs (URLs instead of files)", () => {
+  let docs: http.Server;
+  let origin: string;
+  const requests: Array<{ url?: string; auth?: string }> = [];
+  const spec = (petRef: string) => `openapi: 3.0.3
+info: { title: Hosted, version: "1" }
+servers: [{ url: /v3 }]
+paths:
+  /pets/{id}:
+    get:
+      operationId: getPet
+      parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: "${petRef}" }
+`;
+  let petRef = "/schemas/pet.json";
+
+  before(async () => {
+    // Like springdoc behind a gateway: YAML at an extension-less path, a token required.
+    docs = http.createServer((req, res) => {
+      requests.push({ url: req.url, auth: req.headers.authorization });
+      if (req.headers.authorization !== "Bearer t0ken") {
+        res.statusCode = 401;
+        return res.end("unauthorised");
+      }
+      if (req.url === "/v3/api-docs") {
+        res.setHeader("Content-Type", "application/yaml");
+        return res.end(spec(petRef));
+      }
+      if (req.url === "/schemas/pet.json") {
+        res.setHeader("Content-Type", "application/json");
+        return res.end(JSON.stringify({ type: "object", required: ["name"], properties: { name: { type: "string", example: "Rex" } } }));
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+    await new Promise<void>(resolve => docs.listen(0, "127.0.0.1", () => resolve()));
+    origin = `http://127.0.0.1:${(docs.address() as any).port}`;
+  });
+
+  after(() => docs.close());
+
+  test("loads a localhost spec URL with headers and same-origin $refs", async () => {
+    const spec = await analyseSpecFile(`${origin}/v3/api-docs`, "hosted", { headers: { Authorization: "Bearer t0ken" } });
+    assert.equal(spec.operations[0].operationId, "getPet");
+    assert.deepEqual(spec.operations[0].responses[0].generated, { name: "Rex" });
+    assert.ok(requests.some(r => r.url === "/schemas/pet.json" && r.auth === "Bearer t0ken"), "headers go to $ref requests too");
+  });
+
+  test("says why a spec URL failed", async () => {
+    await assert.rejects(analyseSpecFile(`${origin}/v3/api-docs`, "hosted"), /answered 401/);
+    await assert.rejects(analyseSpecFile("http://127.0.0.1:9/v3/api-docs", "hosted"), /Could not fetch http:\/\/127\.0\.0\.1:9\/v3\/api-docs/);
+  });
+
+  test("keeps the parser's guard for $refs to other origins", async () => {
+    // A spec must not be able to make Swaggerizer fetch from some other host on your network.
+    let hits = 0;
+    const other = http.createServer((_req, res) => {
+      hits++;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ type: "object" }));
+    });
+    await new Promise<void>(resolve => other.listen(0, "127.0.0.1", () => resolve()));
+    petRef = `http://127.0.0.1:${(other.address() as any).port}/pet.json`;
+    try {
+      await assert.rejects(analyseSpecFile(`${origin}/v3/api-docs`, "hosted", { headers: { Authorization: "Bearer t0ken" } }));
+      assert.equal(hits, 0);
+    } finally {
+      petRef = "/schemas/pet.json";
+      other.close();
+    }
+  });
+
+  test("serves and generates from a `source` URL with config headers", async () => {
+    const config: SwaggerizerConfig = { headers: { Authorization: "Bearer t0ken" }, specs: { hosted: { source: `${origin}/v3/api-docs` } } };
+    const sw = createSwaggerizer({ silent: true });
+    try {
+      await sw.loadConfig(config);
+      const server = await sw.listen(0, "127.0.0.1");
+      const res = await call(`http://127.0.0.1:${(server.address() as any).port}/v3/pets/1`);
+      assert.deepEqual(res.json, { name: "Rex" });
+      assert.equal(sw.getState().specs[0].source, `${origin}/v3/api-docs`);
+    } finally {
+      await sw.close();
+    }
+
+    const out = await fs.mkdtemp(path.join(os.tmpdir(), "swaggerizer-url-gen-"));
+    const result = await generate({ config, output: out, silent: true, yes: true });
+    assert.deepEqual(result.generated, ["hosted"]);
+    assert.match(await fs.readFile(path.join(out, "hosted", "hosted.ts"), "utf8"), /getPet/);
+    assert.match(await fs.readFile(path.join(out, "hosted", "model", "index.ts"), "utf8"), /export/);
+  });
+});

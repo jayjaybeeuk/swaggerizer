@@ -43,8 +43,10 @@ const REQUEST_LOG_LIMIT = 300;
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
 export interface SwaggerizerOptions {
-  /** Spec files and/or folders to load. */
+  /** Spec files, folders and/or URLs to load. */
   specs?: string | string[];
+  /** Request headers for spec URLs (a spec config's own `headers` win). */
+  headers?: Record<string, string>;
   /** Path of the admin API and page (default `swaggerizer`, served at `/swaggerizer`). */
   endpoint?: string;
   /** Serve the admin page (default true). The admin API is always available. */
@@ -151,6 +153,7 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
   const servers = new Set<http.Server>();
   const specConfigs: Record<string, SpecConfig> = { ...(options.specConfigs || {}) };
   const store = new Map<string, unknown>();
+  let configHeaders: Record<string, string> = {};
   const configFor = (id: string): SpecConfig => specConfigs[id] || {};
 
   /* ------------------------------------------------------------------ persistence */
@@ -339,7 +342,7 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
       for (let n = 2; usedIds.has(id); n++) id = `${specIdFor(file)}-${n}`;
       usedIds.add(id);
       try {
-        const analysed = await analyseSpecFile(file, id);
+        const analysed = await analyseSpecFile(file, id, { headers: { ...configHeaders, ...(options.headers || {}), ...(configFor(id).headers || {}) } });
         const cfg = configFor(id);
         analysed.operations = applyOverlays(analysed.operations, cfg.scenarios);
         for (const key of unmatchedKeys(cfg.scenarios, analysed.operations)) {
@@ -430,6 +433,7 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
   }
 
   async function loadConfig(config: SwaggerizerConfig): Promise<SwaggerizerState> {
+    configHeaders = { ...(config.headers || {}) };
     for (const [id, spec] of Object.entries(config.specs || {})) {
       specConfigs[id] = spec;
       const local = spec.file ? path.resolve(spec.file) : undefined;

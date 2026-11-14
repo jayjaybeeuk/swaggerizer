@@ -4,6 +4,7 @@
  * plus a contract snapshot used to warn about API changes before the next regeneration.
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   diffContracts,
@@ -44,6 +45,8 @@ export interface GenerateOptions {
   runtimeImport?: string;
   /** Extra orval `output` options, merged over Swaggerizer's defaults. */
   orval?: Record<string, unknown>;
+  /** Request headers for spec URLs (a spec config's own `headers` win). */
+  headers?: Record<string, string>;
   verbose?: boolean;
   silent?: boolean;
   color?: boolean;
@@ -121,8 +124,8 @@ export async function resolveTargets(specInputs: string | string[] | undefined, 
   return targets;
 }
 
-async function analyseTarget(target: SpecTarget): Promise<AnalysedSpec & { config: SpecConfig }> {
-  const spec = await analyseSpecFile(target.input, target.id);
+async function analyseTarget(target: SpecTarget, headers?: Record<string, string>): Promise<AnalysedSpec & { config: SpecConfig }> {
+  const spec = await analyseSpecFile(target.input, target.id, { headers: { ...(headers || {}), ...(target.config.headers || {}) } });
   spec.operations = applyOverlays(spec.operations, target.config.scenarios);
   for (const key of unmatchedKeys(target.config.scenarios, spec.operations)) {
     spec.warnings.push(`Scenario overlay '${key}' matches no operation`);
@@ -134,11 +137,12 @@ async function analyseTarget(target: SpecTarget): Promise<AnalysedSpec & { confi
 export async function checkChanges(
   specInputs: string | string[] | undefined,
   output: string | undefined,
-  config?: SwaggerizerConfig
+  config?: SwaggerizerConfig,
+  headers: Record<string, string> | undefined = config?.headers
 ): Promise<{ specs: Array<AnalysedSpec & { config: SpecConfig }>; reports: ChangeReport[] }> {
   const targets = await resolveTargets(specInputs, config);
   const specs: Array<AnalysedSpec & { config: SpecConfig }> = [];
-  for (const target of targets) specs.push(await analyseTarget(target));
+  for (const target of targets) specs.push(await analyseTarget(target, headers));
   const root = path.resolve(output ?? config?.output ?? "src/api");
   const reports: ChangeReport[] = [];
   for (const spec of specs) {
@@ -202,11 +206,20 @@ async function runOrval(spec: AnalysedSpec & { config: SpecConfig }, dir: string
     options.orval,
     spec.config.orval
   );
-  await generate(
-    { input: { target: spec.file }, output },
-    process.cwd(),
-    { logLevel: options.silent ? "silent" : "warn" }
-  );
+  // A spec URL is handed to orval as the copy already fetched (with any auth headers and
+  // same-origin $refs bundled in), so orval never needs network access of its own.
+  const tmp = spec.raw ? fs.mkdtempSync(path.join(os.tmpdir(), "swaggerizer-")) : undefined;
+  const input = tmp ? path.join(tmp, `${spec.id}.json`) : spec.file;
+  if (tmp) fs.writeFileSync(input, JSON.stringify(spec.raw));
+  try {
+    await generate(
+      { input: { target: input }, output },
+      process.cwd(),
+      { logLevel: options.silent ? "silent" : "warn" }
+    );
+  } finally {
+    if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
+  }
   return output;
 }
 
@@ -319,7 +332,7 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   const failOn: FailOn = options.failOn ?? "breaking";
   const runtimeImport = options.runtimeImport ?? options.config?.runtimeImport ?? "swaggerizer/msw";
 
-  const { specs, reports } = await checkChanges(options.specs, output, options.config);
+  const { specs, reports } = await checkChanges(options.specs, output, options.config, options.headers ?? options.config?.headers);
   for (const report of reports) say(formatReport(report, { color: options.color, verbose: options.verbose }) + "\n");
 
   const blocked = reports.some(r => exceedsThreshold(r, failOn));

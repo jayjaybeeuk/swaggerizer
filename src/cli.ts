@@ -43,6 +43,17 @@ function needSpecs(folder: unknown, config: SwaggerizerConfig | undefined) {
 
 const configOption = { type: "string", describe: "config file (default: ./swaggerizer.config.{ts,mts,js,mjs,json} when present)" } as const;
 const folderOption = { alias: ["f", "specs"], type: "string", array: true, describe: "spec files, folders or URLs" } as const;
+const headerOption = { alias: "H", type: "string", array: true, describe: "request header for spec URLs, e.g. -H 'Authorization: Bearer …'" } as const;
+
+/** `-H 'Name: value'` flags merged over the config's `headers`; undefined when there are none. */
+function headersFrom(flags: unknown, config?: SwaggerizerConfig): Record<string, string> | undefined {
+  const headers: Record<string, string> = { ...(config?.headers || {}) };
+  for (const h of (flags as string[] | undefined) ?? []) {
+    const i = h.indexOf(":");
+    if (i > 0) headers[h.slice(0, i).trim()] = h.slice(i + 1).trim();
+  }
+  return Object.keys(headers).length ? headers : undefined;
+}
 
 export async function run(argv = process.argv): Promise<void> {
   await yargs(hideBin(argv))
@@ -54,6 +65,7 @@ export async function run(argv = process.argv): Promise<void> {
         y
           .option("config", configOption)
           .option("folder", folderOption)
+          .option("header", headerOption)
           .option("port", { alias: "p", type: "number", describe: "port to listen on (default 8080)" })
           .option("host", { type: "string", describe: "interface to bind (default: all)" })
           .option("endpoint", { type: "string", describe: "path of the admin API and page (default swaggerizer)" })
@@ -71,6 +83,7 @@ export async function run(argv = process.argv): Promise<void> {
         await startSwaggerizer({
           config,
           specs: args.folder as string[] | undefined,
+          headers: headersFrom(args.header, config),
           port: args.port ?? config?.port ?? 8080,
           host: args.host ?? config?.host,
           endpoint: args.endpoint ?? config?.endpoint,
@@ -92,6 +105,7 @@ export async function run(argv = process.argv): Promise<void> {
         y
           .option("config", configOption)
           .option("folder", folderOption)
+          .option("header", headerOption)
           .option("output", { alias: "o", type: "string", describe: "folder for generated code (default src/api)" })
           .option("client", { type: "string", describe: "orval client: fetch (default), axios, axios-functions, react-query, swr, vue-query, angular…" })
           .option("base-url", { type: "string", describe: "base URL baked into the generated client" })
@@ -115,6 +129,7 @@ export async function run(argv = process.argv): Promise<void> {
           failOn: args["fail-on"] as FailOn,
           yes: args.yes,
           runtimeImport: args["runtime-import"],
+          headers: headersFrom(args.header, config),
           verbose: args.verbose,
           color: useColor,
           confirm
@@ -129,6 +144,7 @@ export async function run(argv = process.argv): Promise<void> {
         y
           .option("config", configOption)
           .option("folder", folderOption)
+          .option("header", headerOption)
           .option("output", { alias: "o", type: "string", describe: "folder holding the generated code (default src/api)" })
           .option("fail-on", { choices: FAIL_ON, default: "breaking" as FailOn, describe: "exit 1 when changes reach this level" })
           .option("json", { type: "boolean", default: false, describe: "print the reports as JSON" })
@@ -137,7 +153,7 @@ export async function run(argv = process.argv): Promise<void> {
         if (args.json) process.env.SWAGGERIZER_QUIET = "1";
         const config = await configFrom(args.config);
         needSpecs(args.folder, config);
-        const { reports } = await checkChanges(args.folder as string[] | undefined, args.output, config);
+        const { reports } = await checkChanges(args.folder as string[] | undefined, args.output, config, headersFrom(args.header, config));
         if (args.json) console.log(JSON.stringify(reports, null, 2));
         else for (const r of reports) console.log(formatReport(r, { color: useColor, verbose: args.verbose }) + "\n");
         if (reports.some(r => exceedsThreshold(r, args["fail-on"] as FailOn))) process.exitCode = 1;
@@ -150,17 +166,12 @@ export async function run(argv = process.argv): Promise<void> {
         y
           .positional("ids", { type: "string", array: true, describe: "only these spec ids" })
           .option("config", configOption)
-          .option("header", { type: "string", array: true, describe: "extra request header, e.g. --header 'Authorization: Bearer …'" })
+          .option("header", headerOption)
           .option("verbose", { type: "boolean", default: false }),
       async args => {
         const config = await configFrom(args.config);
         if (!config) throw new Error("`pull` needs a swaggerizer.config.ts with `source` URLs.");
-        const headers: Record<string, string> = {};
-        for (const h of (args.header as string[] | undefined) ?? []) {
-          const i = h.indexOf(":");
-          if (i > 0) headers[h.slice(0, i).trim()] = h.slice(i + 1).trim();
-        }
-        const result = await pull({ config, only: args.ids as string[] | undefined, headers, color: useColor, verbose: args.verbose });
+        const result = await pull({ config, only: args.ids as string[] | undefined, headers: headersFrom(args.header), color: useColor, verbose: args.verbose });
         if (result.failed.length) process.exitCode = 1;
       }
     )

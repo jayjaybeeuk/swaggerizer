@@ -57,8 +57,10 @@ export type CustomHandlers = Record<string, CustomHandler>;
 export interface SpecConfig {
   /** Local spec file (committed). Written by `swaggerizer pull` when `source` is set. */
   file?: string;
-  /** URL to pull the spec from (or to load directly when there is no `file`). */
+  /** URL to pull the spec from (or to load directly when there is no `file`), e.g. springdoc's `/v3/api-docs`. */
   source?: string;
+  /** Request headers for `source`, e.g. `{ Authorization: \`Bearer ${process.env.API_DOCS_TOKEN}\` }`. */
+  headers?: Record<string, string>;
   /** Request path prefixes rewritten before matching: `{ "/online-banking/bff/v4/": "/v4/online-banking/" }`. */
   aliases?: Record<string, string>;
   /** Folder for the generated client, models and contract snapshot. Default `<output>/<id>`. */
@@ -80,6 +82,8 @@ export interface SwaggerizerConfig {
   endpoint?: string;
   /** Default latency for every operation, in ms. */
   delay?: number;
+  /** Request headers for every spec URL (a spec's own `headers` win). */
+  headers?: Record<string, string>;
   /** Requests that match no operation are proxied here (e.g. a legacy mock server during migration). */
   fallback?: string;
   stateFile?: string;
