@@ -23,7 +23,7 @@ const copyAdminUi = () => ({
   }
 });
 
-const input = { index: "src/index.ts", msw: "src/msw.ts", "debug-menu": "src/debug-menu.ts" };
+const input = { index: "src/index.ts", msw: "src/msw.ts", "debug-menu": "src/debug-menu.ts", config: "src/config.ts" };
 
 export default [
   {

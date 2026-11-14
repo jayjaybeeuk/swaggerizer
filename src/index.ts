@@ -15,10 +15,13 @@ export {
   type FailOn
 } from "./contract";
 export { analyseSpecFile, loadSpecFile, listSpecFiles, resolveSpecInputs, specIdFor, type AnalysedSpec, type LoadedSpec } from "./spec";
-export { buildCatalogue, basePathsOf, serverUrlOf, statusForCode } from "./catalogue";
+export { buildCatalogue, basePathsOf, serverUrlOf, statusForCode, normaliseMediaType } from "./catalogue";
 export {
+  applyAliases,
   applySelection,
   buildOperationStates,
+  candidatePaths,
+  relativeToBase,
   effectiveExample,
   matchOperation,
   operationKey,
@@ -28,4 +31,8 @@ export {
   SCENARIO_HEADER
 } from "./scenario";
 export { sampleFromSchema } from "./schema";
-export { CONTRACT_FILE, WRAPPER_FILE } from "./paths";
+export { CONTRACT_FILE, WRAPPER_FILE, outputDirs } from "./paths";
+export * from "./config";
+export { loadConfig, findConfigFile, aliasesFromTsconfig } from "./load-config";
+export { pull, type PullOptions, type PullResult } from "./pull";
+export { resolveTargets, moveMocks, type SpecTarget } from "./generate";

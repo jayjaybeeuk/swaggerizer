@@ -23,6 +23,14 @@ import {
   SCENARIO_HEADER,
   toMswPath
 } from "./scenario";
+import { applyAliases } from "./scenario";
+import {
+  createHandlerContext,
+  isHandlerResult,
+  lookupByOperation,
+  type CustomHandlers,
+  type HandlerResult
+} from "./config";
 import {
   GENERATED,
   type OperationState,
@@ -51,6 +59,10 @@ export interface SwaggerizerMswOptions {
   storageKey?: string | false;
   /** Initial choices, merged over any saved in the manifests. */
   scenarios?: ScenarioMap;
+  /** Custom behaviour per operation (keyed by operationId or "GET /route"), as in swaggerizer.config.ts. */
+  handlers?: CustomHandlers;
+  /** Default latency for every operation, in ms. */
+  delay?: number;
 }
 
 export interface SwaggerizerMocks {
@@ -129,7 +141,7 @@ export function createSwaggerizerMocks(options: SwaggerizerMswOptions = {}): Swa
   };
 
   function operations(): OperationState[] {
-    const local = buildOperationStates(planner, scenarios);
+    const local = buildOperationStates(planner, scenarios, { defaultDelay: options.delay });
     if (!remoteStates) return local;
     const byKey = new Map(remoteStates.filter(s => s.active).map(s => [s.key, s]));
     return local.map(op => {
@@ -241,6 +253,7 @@ export function createSwaggerizerMocks(options: SwaggerizerMswOptions = {}): Swa
     }
     // Reset means "spec default", not "generated-time default": drop manifest scenarios too.
     scenarios = next;
+    if (!filter.method && !filter.route) store.clear();
     persist();
     notify();
   }
@@ -263,18 +276,66 @@ export function createSwaggerizerMocks(options: SwaggerizerMswOptions = {}): Swa
     if (found) fallbackFor.set(op.key, found);
   }
 
-  const ownHandlers: RequestHandler[] = unique.map(({ op }) => {
-    const path = `${base}${toMswPath(op.route)}`;
+  const store = new Map<string, unknown>();
+
+  /** Request paths an operation answers on: its route, and every alias spelling of it. */
+  function pathsFor(op: OperationState | (typeof unique)[number]["op"], manifest: SwaggerizerManifest): string[] {
+    const canonical = [op.route, ...manifest.basePaths.map(b => b + op.route)];
+    const paths = new Set([op.route]);
+    for (const [from, to] of Object.entries(manifest.aliases || {})) {
+      for (const p of canonical) if (to && p.startsWith(to)) paths.add(from + p.slice(to.length));
+    }
+    return [...paths];
+  }
+
+  function respondWith(result: HandlerResult): Response {
+    const contentType = result.contentType ?? (result.body !== undefined ? (typeof result.body === "string" ? "text/plain" : "application/json") : undefined);
+    const headers: Record<string, string> = { ...(result.headers || {}), "X-Swaggerizer-Scenario": `${result.status}:handler` };
+    const payload = result.status === 204 || result.status === 304 ? undefined : encodeBody(result.body, contentType);
+    if (payload !== undefined && contentType) headers["Content-Type"] = contentType;
+    return new HttpResponse(payload ?? null, { status: result.status, headers });
+  }
+
+  const ownHandlers: RequestHandler[] = unique.flatMap(({ op, manifest }) => pathsFor(op, manifest).map(route => {
+    const path = `${base}${toMswPath(route)}`;
     const factory = (http as any)[op.method] as typeof http.get;
-    return factory(path, async ({ request }) => {
+    return factory(path, async ({ request, params: mswParams }) => {
       const started = Date.now();
       const state = (await freshOperations()).find(o => o.key === op.key && o.active);
       if (!state) return undefined;
       const override = parseScenarioHeader(request.headers.get(SCENARIO_HEADER));
-      const resolved = resolveResponse(state, override);
-      if (resolved.delay > 0) await mswDelay(resolved.delay);
       const url = new URL(request.url);
       const entry = { method: request.method, path: url.pathname + url.search, route: op.route, specId: op.specId };
+
+      const custom = lookupByOperation(options.handlers, op);
+      if (custom && !override && !state.modified) {
+        const text = request.method === "GET" || request.method === "HEAD" ? undefined : await request.clone().text();
+        let body: unknown = text;
+        if (text !== undefined) {
+          try {
+            body = text.trim() ? JSON.parse(text) : undefined;
+          } catch {
+            body = text;
+          }
+        }
+        // MSW parsed the path parameters; map its sanitised names back to the spec's.
+        const params: Record<string, string> = {};
+        for (const [, name] of op.route.matchAll(/\{([^}]+)\}/g)) {
+          const value = mswParams[name.replace(/[^A-Za-z0-9_]/g, "_")];
+          if (value !== undefined) params[name] = decodeURIComponent(String(Array.isArray(value) ? value[0] : value));
+        }
+        const headers: Record<string, string> = {};
+        request.headers.forEach((value, key) => (headers[key] = value));
+        const outcome = await custom(createHandlerContext({ operation: state, method: request.method, path: url.pathname, params, query: url.searchParams, headers, body, store }));
+        if (isHandlerResult(outcome)) {
+          if (state.delay > 0) await mswDelay(state.delay);
+          reportRequest({ ...entry, status: outcome.status, example: "handler", ms: Date.now() - started });
+          return respondWith(outcome);
+        }
+      }
+
+      const resolved = resolveResponse(state, override);
+      if (resolved.delay > 0) await mswDelay(resolved.delay);
 
       if (resolved.kind === "proxy") {
         reportRequest({ ...entry, status: 0, example: "proxy", ms: Date.now() - started });
@@ -284,7 +345,10 @@ export function createSwaggerizerMocks(options: SwaggerizerMswOptions = {}): Swa
       const fallback = fallbackFor.get(op.key);
       if (fallback && resolved.variant === GENERATED && resolved.status >= 200 && resolved.status < 300) {
         // Let orval's faker handler for this operation produce the body.
-        const response = await getResponse([fallback], request.clone());
+        // orval only knows the canonical route, so hand it the de-aliased URL.
+        const canonical = applyAliases(url.pathname, manifest.aliases)[0];
+        const forFallback = canonical ? new Request(new URL(canonical + url.search, url.origin), request.clone()) : request.clone();
+        const response = await getResponse([fallback], forFallback);
         if (response) {
           reportRequest({ ...entry, status: response.status, example: "generated (orval)", ms: Date.now() - started });
           return response;
@@ -298,7 +362,7 @@ export function createSwaggerizerMocks(options: SwaggerizerMswOptions = {}): Swa
       reportRequest({ ...entry, status: resolved.status, example: resolved.variant, ms: Date.now() - started });
       return new HttpResponse(payload ?? null, { status: resolved.status, headers });
     });
-  });
+  }));
 
   if (server) void sync();
 

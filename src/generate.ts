@@ -12,15 +12,18 @@ import {
   type Contract,
   type FailOn
 } from "./contract";
-import { CONTRACT_FILE, INDEX_FILE, WRAPPER_FILE } from "./paths";
-import { analyseSpecFile, resolveSpecInputs, type AnalysedSpec } from "./spec";
+import { CONTRACT_FILE, INDEX_FILE, WRAPPER_FILE, outputDirs } from "./paths";
+import { analyseSpecFile, resolveSpecInputs, specIdFor, type AnalysedSpec } from "./spec";
+import { applyOverlays, unmatchedKeys, type SpecConfig, type SwaggerizerConfig } from "./config";
 import type { ChangeReport, ScenarioMap, SwaggerizerManifest } from "./types";
 
 export interface GenerateOptions {
-  /** Spec files and/or folders. */
-  specs: string | string[];
-  /** Root folder for generated code; each spec gets its own sub-folder. */
-  output: string;
+  /** Spec files, folders and/or URLs. Optional when `config` declares the specs. */
+  specs?: string | string[];
+  /** Specs and per-spec settings from swaggerizer.config.ts. */
+  config?: SwaggerizerConfig;
+  /** Root folder for generated code; each spec gets its own sub-folder unless it sets `output`. */
+  output?: string;
   /** orval client: fetch (default), axios, axios-functions, react-query, vue-query, svelte-query, swr, angular, hono, zod… */
   client?: string;
   /** Base URL baked into the generated client (orval `output.baseUrl`). */
@@ -90,16 +93,56 @@ function orphanSnapshots(output: string, ids: Set<string>): Contract[] {
   return out;
 }
 
+export interface SpecTarget {
+  id: string;
+  /** Local file or URL. */
+  input: string;
+  config: SpecConfig;
+}
+
+/** Every spec to work on: those declared in the config plus any extra files, folders or URLs. */
+export async function resolveTargets(specInputs: string | string[] | undefined, config?: SwaggerizerConfig): Promise<SpecTarget[]> {
+  const targets: SpecTarget[] = [];
+  for (const [id, spec] of Object.entries(config?.specs || {})) {
+    const input = spec.file && fs.existsSync(spec.file) ? spec.file : spec.source;
+    if (!input) throw new Error(`Spec '${id}' needs a \`file\` that exists or a \`source\` URL (run \`swaggerizer pull\`).`);
+    targets.push({ id, input, config: spec });
+  }
+  const extra = specInputs === undefined ? [] : ([] as string[]).concat(specInputs);
+  if (extra.length) {
+    const files = await resolveSpecInputs(extra);
+    if (files.length === 0) throw new Error(`No OpenAPI / Swagger files found in ${extra.join(", ")}.`);
+    for (const file of files) {
+      const id = specIdFor(file);
+      if (!targets.some(t => t.id === id)) targets.push({ id, input: file, config: config?.specs?.[id] || {} });
+    }
+  }
+  if (targets.length === 0) throw new Error("No specs given: pass --folder or create swaggerizer.config.ts.");
+  return targets;
+}
+
+async function analyseTarget(target: SpecTarget): Promise<AnalysedSpec & { config: SpecConfig }> {
+  const spec = await analyseSpecFile(target.input, target.id);
+  spec.operations = applyOverlays(spec.operations, target.config.scenarios);
+  for (const key of unmatchedKeys(target.config.scenarios, spec.operations)) {
+    spec.warnings.push(`Scenario overlay '${key}' matches no operation`);
+  }
+  return { ...spec, config: target.config };
+}
+
 /** Compares every spec with the snapshot saved at the last generation. */
-export async function checkChanges(specInputs: string | string[], output: string): Promise<{ specs: AnalysedSpec[]; reports: ChangeReport[] }> {
-  const files = await resolveSpecInputs(([] as string[]).concat(specInputs));
-  if (files.length === 0) throw new Error(`No OpenAPI / Swagger files found in ${([] as string[]).concat(specInputs).join(", ")}.`);
-  const specs: AnalysedSpec[] = [];
-  for (const file of files) specs.push(await analyseSpecFile(file));
-  const root = path.resolve(output);
+export async function checkChanges(
+  specInputs: string | string[] | undefined,
+  output: string | undefined,
+  config?: SwaggerizerConfig
+): Promise<{ specs: Array<AnalysedSpec & { config: SpecConfig }>; reports: ChangeReport[] }> {
+  const targets = await resolveTargets(specInputs, config);
+  const specs: Array<AnalysedSpec & { config: SpecConfig }> = [];
+  for (const target of targets) specs.push(await analyseTarget(target));
+  const root = path.resolve(output ?? config?.output ?? "src/api");
   const reports: ChangeReport[] = [];
   for (const spec of specs) {
-    const snapshot = readJson<Contract>(path.join(root, spec.id, CONTRACT_FILE));
+    const snapshot = readJson<Contract>(path.join(outputDirs(spec.id, root, spec.config).dir, CONTRACT_FILE));
     if (!snapshot) {
       reports.push({
         specId: spec.id,
@@ -130,24 +173,62 @@ export async function checkChanges(specInputs: string | string[], output: string
   return { specs, reports };
 }
 
-async function runOrval(spec: AnalysedSpec, dir: string, options: GenerateOptions) {
+function mergeOrval(...parts: Array<Record<string, unknown> | undefined>): Record<string, unknown> {
+  const out: Record<string, any> = {};
+  for (const part of parts) {
+    for (const [key, value] of Object.entries(part || {})) {
+      out[key] =
+        value && typeof value === "object" && !Array.isArray(value) && out[key] && typeof out[key] === "object"
+          ? mergeOrval(out[key], value as Record<string, unknown>)
+          : value;
+    }
+  }
+  return out;
+}
+
+async function runOrval(spec: AnalysedSpec & { config: SpecConfig }, dir: string, options: GenerateOptions): Promise<Record<string, unknown>> {
   const mod: any = await import("orval");
   const generate = mod.generate ?? mod.default;
-  const output: Record<string, unknown> = {
-    target: path.join(dir, `${spec.id}.ts`),
-    schemas: path.join(dir, "model"),
-    client: options.client || "fetch",
-    mode: "split",
-    mock: options.mock !== false,
-    clean: true,
-    ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
-    ...(options.orval || {})
-  };
+  const output = mergeOrval(
+    {
+      target: path.join(dir, `${spec.id}.ts`),
+      schemas: path.join(dir, "model"),
+      client: options.client || options.config?.client || "fetch",
+      mode: "split",
+      mock: options.mock !== false,
+      clean: true,
+      ...(options.baseUrl ? { baseUrl: options.baseUrl } : {})
+    },
+    options.orval,
+    spec.config.orval
+  );
   await generate(
     { input: { target: spec.file }, output },
     process.cwd(),
     { logLevel: options.silent ? "silent" : "warn" }
   );
+  return output;
+}
+
+function relImport(fromDir: string, target: string): string {
+  const rel = path.relative(fromDir, target).split(path.sep).join("/");
+  return rel.startsWith(".") ? rel : `./${rel}`;
+}
+
+/**
+ * Moves orval's MSW + faker files into the mocks folder (Nx-style repos keep mocks apart from
+ * shipped code) and points their imports back at the models.
+ */
+export function moveMocks(id: string, dir: string, mocksDir: string): void {
+  fs.mkdirSync(mocksDir, { recursive: true });
+  const modelImport = relImport(mocksDir, path.join(dir, "model"));
+  for (const name of [`${id}.msw.ts`, `${id}.faker.ts`]) {
+    const from = path.join(dir, name);
+    if (!fs.existsSync(from)) continue;
+    const source = fs.readFileSync(from, "utf8").replace(/from (['"])\.\/model\1/g, `from $1${modelImport}$1`);
+    fs.writeFileSync(path.join(mocksDir, name), source);
+    fs.rmSync(from);
+  }
 }
 
 /** Name of orval's aggregate `get<Title>Mock()` export in the generated `.msw.ts` file. */
@@ -234,11 +315,11 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   const say = (message: string) => {
     if (!options.silent) console.log(message);
   };
-  const output = path.resolve(options.output);
+  const output = path.resolve(options.output ?? options.config?.output ?? "src/api");
   const failOn: FailOn = options.failOn ?? "breaking";
-  const runtimeImport = options.runtimeImport ?? "swaggerizer/msw";
+  const runtimeImport = options.runtimeImport ?? options.config?.runtimeImport ?? "swaggerizer/msw";
 
-  const { specs, reports } = await checkChanges(options.specs, output);
+  const { specs, reports } = await checkChanges(options.specs, output, options.config);
   for (const report of reports) say(formatReport(report, { color: options.color, verbose: options.verbose }) + "\n");
 
   const blocked = reports.some(r => exceedsThreshold(r, failOn));
@@ -257,11 +338,16 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
   const entries: Array<{ id: string; clientModule: string }> = [];
 
   for (const spec of specs) {
-    const dir = path.join(output, spec.id);
+    const { dir, mocksDir } = outputDirs(spec.id, output, spec.config);
+    for (const warning of spec.warnings.filter(w => /matches no operation/.test(w))) say(`  ! ${spec.id}: ${warning}`);
     say(`Generating ${spec.id} → ${path.relative(process.cwd(), dir) || dir}`);
-    await runOrval(spec, dir, options);
+    const orvalOutput = await runOrval(spec, dir, options);
+    if (mocksDir !== dir) {
+      if (orvalOutput.mode === "split") moveMocks(spec.id, dir, mocksDir);
+      else say(`  ! ${spec.id}: mocksOutput only works with orval mode "split"; mocks left in ${dir}.`);
+    }
 
-    const mockFile = path.join(dir, `${spec.id}.msw.ts`);
+    const mockFile = path.join(mocksDir, `${spec.id}.msw.ts`);
     const aggregate = fs.existsSync(mockFile) ? findMockAggregate(fs.readFileSync(mockFile, "utf8")) : undefined;
     if (options.mock !== false && !aggregate) {
       say(`  ! Could not find orval's MSW handler list in ${mockFile}; "generated" responses will use Swaggerizer samples.`);
@@ -272,21 +358,24 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
       title: spec.contract.title,
       version: spec.contract.version,
       basePaths: spec.basePaths,
-      operations: spec.operations
+      operations: spec.operations,
+      ...(spec.config.aliases ? { aliases: spec.config.aliases } : {})
     };
     const scenarios = scenariosFor(spec, saved);
     if (scenarios) manifest.scenarios = scenarios;
 
+    fs.mkdirSync(mocksDir, { recursive: true });
     fs.writeFileSync(
-      path.join(dir, WRAPPER_FILE),
-      renderWrapper(spec, manifest, aggregate ? `${spec.id}.msw` : undefined, aggregate, runtimeImportFor(runtimeImport, dir))
+      path.join(mocksDir, WRAPPER_FILE),
+      renderWrapper(spec, manifest, aggregate ? `${spec.id}.msw` : undefined, aggregate, runtimeImportFor(runtimeImport, mocksDir))
     );
     fs.writeFileSync(
       path.join(dir, CONTRACT_FILE),
       JSON.stringify({ ...spec.contract, generatedAt: new Date().toISOString() }, null, 2) + "\n"
     );
     generated.push(spec.id);
-    entries.push({ id: spec.id, clientModule: spec.id });
+    // Only specs in the default layout (<output>/<id>/) go in the aggregate index.
+    if (!spec.config.output && !spec.config.mocksOutput) entries.push({ id: spec.id, clientModule: spec.id });
   }
 
   // Specs whose file was removed: the removal has now been accepted, so record it in their
@@ -297,7 +386,12 @@ export async function generate(options: GenerateOptions): Promise<GenerateResult
     say(`  ${orphan.specId}: spec file removed — ${path.join(path.relative(process.cwd(), output), orphan.specId)} is no longer used and can be deleted.`);
   }
 
-  fs.writeFileSync(path.join(output, INDEX_FILE), renderIndex(entries, runtimeImportFor(runtimeImport, output)));
-  say(`Done: ${generated.length} spec(s) generated in ${path.relative(process.cwd(), output) || output}`);
+  if (entries.length) {
+    fs.mkdirSync(output, { recursive: true });
+    fs.writeFileSync(path.join(output, INDEX_FILE), renderIndex(entries, runtimeImportFor(runtimeImport, output)));
+  }
+  say(entries.length === generated.length
+    ? `Done: ${generated.length} spec(s) generated in ${path.relative(process.cwd(), output) || output}`
+    : `Done: ${generated.length} spec(s) generated.`);
   return { reports, generated, skipped: false, blocked };
 }

@@ -1,0 +1,10 @@
+{
+  // Comments and trailing commas, like a real Nx tsconfig.base.json
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@example/fixtures/rewards": ["fixtures/rewards.ts"],
+      "@example/fixtures/*": ["fixtures/*"],
+    },
+  },
+}

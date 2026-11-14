@@ -67,12 +67,22 @@ export function extractExamples(media: Json, doc: Json): CatalogueExample[] {
   return examples;
 }
 
+/**
+ * Media types as they are served. springdoc writes `*\/*` for JSON responses; serving that as a
+ * Content-Type confuses clients, so wildcards become `application/json`.
+ */
+export function normaliseMediaType(type: string): string {
+  const t = type.trim().toLowerCase();
+  return t === "*/*" || t === "*" || t === "application/*" ? "application/json" : type;
+}
+
 export function buildResponse(code: string, raw: Json, doc: Json): CatalogueResponse {
   const { node: response } = deref(doc, raw);
   const content = response?.content && typeof response.content === "object" ? response.content : {};
-  const contentTypes = Object.keys(content);
-  const preferred = preferredContentType(contentTypes);
-  const media = preferred ? content[preferred] : undefined;
+  const contentTypes = [...new Set(Object.keys(content).map(normaliseMediaType))];
+  const keys = Object.keys(content);
+  const preferred = preferredContentType(keys) ?? keys[0];
+  const media = preferred ? content[preferred] : keys.length ? content[keys[0]] : undefined;
   const examples = extractExamples(media, doc);
 
   const result: CatalogueResponse = {

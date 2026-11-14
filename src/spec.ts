@@ -4,6 +4,7 @@ import path from "node:path";
 import SwaggerParser from "@apidevtools/swagger-parser";
 import { basePathsOf, buildCatalogue, serverUrlOf } from "./catalogue";
 import { buildContract, type Contract } from "./contract";
+import { isUrl } from "./paths";
 import type { CatalogueOperation } from "./types";
 
 export const SPEC_FILE_PATTERN = /\.(ya?ml|json)$/i;
@@ -70,7 +71,7 @@ export async function listSpecFiles(folder: string): Promise<string[]> {
 }
 
 export async function loadSpecFile(file: string): Promise<LoadedSpec> {
-  const absolute = path.resolve(file);
+  const absolute = isUrl(file) ? file : path.resolve(file);
   // bundle() resolves external $refs into internal ones but keeps the document acyclic.
   const bundled: any = await SwaggerParser.bundle(absolute);
   const warnings: string[] = [];
@@ -105,8 +106,9 @@ export async function loadSpecFile(file: string): Promise<LoadedSpec> {
 
 /** Stable id for a spec file: its basename without extensions (`users.swagger.json` → `users`). */
 export function specIdFor(file: string): string {
+  const name = isUrl(file) ? new URL(file).pathname.split("/").filter(Boolean).pop() || new URL(file).hostname : file;
   return path
-    .basename(file)
+    .basename(name)
     .replace(SPEC_FILE_PATTERN, "")
     .replace(/\.(swagger|openapi|oas|spec)$/i, "")
     .replace(/[^A-Za-z0-9_-]+/g, "-");
@@ -136,6 +138,10 @@ export async function analyseSpecFile(file: string, id = specIdFor(file)): Promi
 export async function resolveSpecInputs(inputs: string[]): Promise<string[]> {
   const out: string[] = [];
   for (const input of inputs) {
+    if (isUrl(input)) {
+      out.push(input);
+      continue;
+    }
     const absolute = path.resolve(input);
     const stat = await fs.promises.stat(absolute);
     if (stat.isDirectory()) out.push(...(await listSpecFiles(absolute)));

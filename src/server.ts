@@ -8,14 +8,27 @@ import {
   applySelection,
   buildOperationStates,
   encodeBody,
+  candidatePaths,
   matchOperation,
   operationKey,
+  relativeToBase,
   parseScenarioHeader,
   resolveResponse,
   SCENARIO_HEADER
 } from "./scenario";
 import { analyseSpecFile, listSpecFiles, specIdFor, type AnalysedSpec } from "./spec";
-import { CONTRACT_FILE } from "./paths";
+import { CONTRACT_FILE, isUrl, outputDirs } from "./paths";
+import {
+  applyOverlays,
+  createHandlerContext,
+  extractParams,
+  isHandlerResult,
+  lookupByOperation,
+  unmatchedKeys,
+  type HandlerResult,
+  type SpecConfig,
+  type SwaggerizerConfig
+} from "./config";
 import type {
   ChangeReport,
   OperationState,
@@ -46,6 +59,12 @@ export interface SwaggerizerOptions {
   watch?: boolean;
   /** Add permissive CORS headers (default true). */
   cors?: boolean;
+  /** Per-spec settings (aliases, overlays, handlers, proxy) keyed by spec id. */
+  specConfigs?: Record<string, SpecConfig>;
+  /** Default latency for every operation, in ms. */
+  delay?: number;
+  /** Requests that match no operation are proxied here (e.g. a legacy mock server during migration). */
+  fallback?: string;
   silent?: boolean;
 }
 
@@ -55,12 +74,14 @@ interface SpecRecord extends AnalysedSpec {
   error?: string;
 }
 
-type Source = { kind: "folder" | "file"; path: string };
+type Source = { kind: "folder" | "file" | "url"; path: string; id?: string };
 
 export interface Swaggerizer {
   /** Node `http` request listener; also works as Express/Connect middleware. */
   handler: (req: http.IncomingMessage, res: http.ServerResponse, next?: () => void) => void;
   load: (inputs: string | string[]) => Promise<SwaggerizerState>;
+  /** Load every spec declared in a swaggerizer.config.ts. */
+  loadConfig: (config: SwaggerizerConfig) => Promise<SwaggerizerState>;
   reload: () => Promise<SwaggerizerState>;
   getState: () => SwaggerizerState;
   select: (selection: ScenarioSelection | ScenarioSelection[]) => OperationState[];
@@ -128,6 +149,9 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
   let reloadChain: Promise<unknown> = Promise.resolve();
   const watchers: fs.FSWatcher[] = [];
   const servers = new Set<http.Server>();
+  const specConfigs: Record<string, SpecConfig> = { ...(options.specConfigs || {}) };
+  const store = new Map<string, unknown>();
+  const configFor = (id: string): SpecConfig => specConfigs[id] || {};
 
   /* ------------------------------------------------------------------ persistence */
 
@@ -161,7 +185,7 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
   /* ------------------------------------------------------------------ state */
 
   const ordered = () => [...specs.values()];
-  const states = () => buildOperationStates(ordered(), scenarios);
+  const states = () => buildOperationStates(ordered(), scenarios, { defaultDelay: options.delay });
 
   function summarise(spec: SpecRecord): SpecSummary {
     return {
@@ -176,7 +200,9 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
       ...(spec.error ? { error: spec.error } : {}),
       warnings: spec.warnings,
       basePaths: spec.basePaths,
-      proxyTarget: options.proxy || spec.serverUrl,
+      ...(configFor(spec.id).aliases ? { aliases: configFor(spec.id).aliases } : {}),
+      ...(isUrl(spec.file) ? { source: spec.file } : {}),
+      proxyTarget: configFor(spec.id).proxy || options.proxy || spec.serverUrl,
       operationCount: spec.operations.length
     };
   }
@@ -186,7 +212,15 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
       ...snapshotReports,
       ...[...previousReports.values()].filter(r => r.changes.length > 0)
     ];
-    return { endpoint, specs: ordered().map(summarise), operations: states(), lastReload, changes };
+    return {
+      endpoint,
+      ...(options.delay ? { defaultDelay: options.delay } : {}),
+      ...(options.fallback ? { fallback: options.fallback } : {}),
+      specs: ordered().map(summarise),
+      operations: states(),
+      lastReload,
+      changes
+    };
   }
 
   function servingOperation(method: string, route: string): OperationState | undefined {
@@ -224,6 +258,8 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
       delete scenarios[key];
       count++;
     }
+    // "Reset all" also empties the state custom handlers keep.
+    if (!filter.method && !filter.route) store.clear();
     saveState();
     return count;
   }
@@ -252,8 +288,9 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
   /* ------------------------------------------------------------------ loading */
 
   function readSnapshot(specId: string): Contract | undefined {
-    if (!options.generated) return undefined;
-    const file = path.join(path.resolve(options.generated), specId, CONTRACT_FILE);
+    const cfg = configFor(specId);
+    if (!options.generated && !cfg.output) return undefined;
+    const file = path.join(outputDirs(specId, options.generated, cfg).dir, CONTRACT_FILE);
     if (!fs.existsSync(file)) return undefined;
     try {
       return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -273,20 +310,21 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
     }
   }
 
-  async function wantedFiles(): Promise<string[]> {
-    const files: string[] = [];
+  async function wantedFiles(): Promise<Array<{ file: string; id?: string }>> {
+    const files: Array<{ file: string; id?: string }> = [];
     for (const source of sources) {
       if (source.kind === "folder") {
         try {
-          files.push(...(await listSpecFiles(source.path)));
+          files.push(...(await listSpecFiles(source.path)).map(file => ({ file })));
         } catch {
           // folder vanished
         }
-      } else if (fs.existsSync(source.path)) {
-        files.push(source.path);
+      } else if (source.kind === "url" || fs.existsSync(source.path)) {
+        files.push({ file: source.path, id: source.id });
       }
     }
-    return [...new Set(files)];
+    const seen = new Set<string>();
+    return files.filter(f => (seen.has(f.file) ? false : (seen.add(f.file), true)));
   }
 
   async function doReload(): Promise<SwaggerizerState> {
@@ -295,13 +333,21 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
     const next = new Map<string, SpecRecord>();
     const usedIds = new Set<string>();
 
-    for (const file of await wantedFiles()) {
+    for (const { file, id: configuredId } of await wantedFiles()) {
       const before = previous.get(file);
-      let id = before?.id ?? specIdFor(file);
+      let id = configuredId ?? before?.id ?? specIdFor(file);
       for (let n = 2; usedIds.has(id); n++) id = `${specIdFor(file)}-${n}`;
       usedIds.add(id);
       try {
         const analysed = await analyseSpecFile(file, id);
+        const cfg = configFor(id);
+        analysed.operations = applyOverlays(analysed.operations, cfg.scenarios);
+        for (const key of unmatchedKeys(cfg.scenarios, analysed.operations)) {
+          analysed.warnings.push(`Scenario overlay '${key}' matches no operation`);
+        }
+        for (const key of unmatchedKeys(cfg.handlers, analysed.operations)) {
+          analysed.warnings.push(`Custom handler '${key}' matches no operation`);
+        }
         const enabled = before ? before.enabled : !disabled.has(id);
         next.set(id, { ...analysed, enabled, loadedAt: new Date().toISOString() });
         if (before && !before.error) {
@@ -311,7 +357,7 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
             log(silent, `${id}: ${report.counts.breaking} breaking, ${report.counts.warning} warning(s) since last load`);
           }
         }
-        log(silent, `Loaded ${path.basename(file)} (${analysed.specVersion}) – ${analysed.operations.length} operation(s)`);
+        log(silent, `Loaded ${isUrl(file) ? file : path.basename(file)} (${analysed.specVersion}) – ${analysed.operations.length} operation(s)`);
       } catch (err: any) {
         const message = err?.message ? String(err.message).split("\n")[0] : String(err);
         log(silent, `Could not load ${file}: ${message}`);
@@ -368,12 +414,34 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
 
   async function load(inputs: string | string[]): Promise<SwaggerizerState> {
     for (const input of ([] as string[]).concat(inputs)) {
+      if (isUrl(input)) {
+        if (!sources.some(s => s.path === input)) sources.push({ kind: "url", path: input });
+        continue;
+      }
       const absolute = path.resolve(input);
       const stat = await fs.promises.stat(absolute);
       const kind = stat.isDirectory() ? "folder" : "file";
       if (!sources.some(s => s.path === absolute)) {
         sources.push({ kind, path: absolute });
         watch(absolute);
+      }
+    }
+    return reload();
+  }
+
+  async function loadConfig(config: SwaggerizerConfig): Promise<SwaggerizerState> {
+    for (const [id, spec] of Object.entries(config.specs || {})) {
+      specConfigs[id] = spec;
+      const local = spec.file ? path.resolve(spec.file) : undefined;
+      if (local && fs.existsSync(local)) {
+        if (!sources.some(s => s.path === local)) {
+          sources.push({ kind: "file", path: local, id });
+          watch(local);
+        }
+      } else if (spec.source) {
+        if (!sources.some(s => s.path === spec.source)) sources.push({ kind: "url", path: spec.source, id });
+      } else {
+        throw new Error(`Spec '${id}' needs a \`file\` that exists or a \`source\` URL (run \`swaggerizer pull\`).`);
       }
     }
     return reload();
@@ -415,25 +483,65 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
     const method = (req.method || "GET").toLowerCase();
     const enabledSpecs = ordered().filter(s => s.enabled && !s.error);
     const allBasePaths = [...new Set(enabledSpecs.flatMap(s => s.basePaths))];
-    const op = matchOperation(states(), method, url.pathname, allBasePaths);
+    const allAliases = Object.assign({}, ...enabledSpecs.map(s => configFor(s.id).aliases || {}));
+    const op = matchOperation(states(), method, url.pathname, allBasePaths, allAliases);
     if (!op) return false;
 
     const spec = specs.get(op.specId)!;
+    const cfg = configFor(op.specId);
     const override = parseScenarioHeader(req.headers[SCENARIO_HEADER] as string | undefined);
+    const entry = { method: method.toUpperCase(), path: url.pathname + url.search, route: op.route, specId: op.specId, source: "server" as const };
+
+    const custom = lookupByOperation(cfg.handlers, op);
+    if (custom && !override && !op.modified) {
+      const raw = method === "get" || method === "head" ? undefined : (await readBody(req)).toString("utf8");
+      let body: unknown = raw;
+      if (raw !== undefined) {
+        try {
+          body = raw.trim() ? JSON.parse(raw) : undefined;
+        } catch {
+          body = raw;
+        }
+      }
+      const params = candidatePaths(url.pathname, spec.basePaths, cfg.aliases || {})
+        .map(p => extractParams(op.route, p))
+        .find(p => Object.keys(p).length > 0) ?? {};
+      const headers = Object.fromEntries(
+        Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : String(v ?? "")])
+      );
+      let outcome: HandlerResult | undefined | void;
+      try {
+        outcome = await custom(createHandlerContext({ operation: op, method: method.toUpperCase(), path: url.pathname, params, query: url.searchParams, headers, body, store }));
+      } catch (err: any) {
+        sendJson(res, 500, { error: `Custom handler for ${op.operationId ?? op.key} threw: ${err?.message ?? err}` });
+        recordRequest({ ...entry, status: 500, example: "handler error", ms: Date.now() - started });
+        return true;
+      }
+      if (isHandlerResult(outcome)) {
+        if (op.delay > 0) await sleep(op.delay);
+        const contentType = outcome.contentType ?? (outcome.body !== undefined ? (typeof outcome.body === "string" ? "text/plain" : "application/json") : undefined);
+        res.statusCode = outcome.status;
+        for (const [name, value] of Object.entries(outcome.headers || {})) res.setHeader(name, value);
+        res.setHeader("X-Swaggerizer-Scenario", `${outcome.status}:handler`);
+        const payload = outcome.status === 204 || outcome.status === 304 ? undefined : encodeBody(outcome.body, contentType);
+        if (payload !== undefined && contentType) res.setHeader("Content-Type", contentType);
+        res.end(payload);
+        recordRequest({ ...entry, status: outcome.status, example: "handler", contentType, ms: Date.now() - started });
+        return true;
+      }
+    }
+
     const resolved = resolveResponse(op, override);
     if (resolved.delay > 0) await sleep(resolved.delay);
 
-    const entry = { method: method.toUpperCase(), path: url.pathname + url.search, route: op.route, specId: op.specId, source: "server" as const };
-
     if (resolved.kind === "proxy") {
-      const target = options.proxy || spec.serverUrl;
+      const target = cfg.proxy || options.proxy || spec.serverUrl;
       if (!target) {
         sendJson(res, 502, { error: `No upstream for ${op.specId}: pass --proxy or declare an absolute URL in servers.` });
         recordRequest({ ...entry, status: 502, example: "proxy", ms: Date.now() - started });
         return true;
       }
-      const base = spec.basePaths.find(b => url.pathname === b || url.pathname.startsWith(b + "/"));
-      const relative = base ? url.pathname.slice(base.length) || "/" : url.pathname;
+      const relative = relativeToBase(url.pathname, spec.basePaths, cfg.aliases || {});
       try {
         const status = await proxy(req, res, target, relative, url.search);
         recordRequest({ ...entry, status, example: "proxy", ms: Date.now() - started });
@@ -511,6 +619,17 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
         if (await admin.handle(request, res)) return;
       } else if (await serveMock(req, res, url)) {
         return;
+      } else if (options.fallback) {
+        const started = Date.now();
+        const method = (req.method || "GET").toUpperCase();
+        try {
+          const status = await proxy(req, res, options.fallback, url.pathname, url.search);
+          recordRequest({ method, path: url.pathname + url.search, status, example: "fallback", source: "server", ms: Date.now() - started });
+        } catch (err: any) {
+          sendJson(res, 502, { error: `Fallback to ${options.fallback} failed: ${err?.message ?? err}` });
+          recordRequest({ method, path: url.pathname + url.search, status: 502, example: "fallback", source: "server", ms: Date.now() - started });
+        }
+        return;
       }
 
       if (next) return next();
@@ -554,6 +673,7 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
   return {
     handler,
     load,
+    loadConfig,
     reload,
     getState,
     select,
@@ -570,8 +690,9 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
 }
 
 /** CLI entry point: load specs and listen. */
-export async function startSwaggerizer(options: SwaggerizerOptions & { port?: number; host?: string }) {
+export async function startSwaggerizer(options: SwaggerizerOptions & { port?: number; host?: string; config?: SwaggerizerConfig }) {
   const swaggerizer = createSwaggerizer(options);
+  if (options.config) await swaggerizer.loadConfig(options.config);
   if (options.specs) await swaggerizer.load(options.specs);
   const server = await swaggerizer.listen(options.port ?? 8080, options.host);
   return { ...swaggerizer, server };
