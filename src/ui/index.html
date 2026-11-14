@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="swaggerizer-base" content="__SWAGGERIZER_BASE__" />
+    <title>swaggerizer · scenario control</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f766e'/%3E%3Ctext x='16' y='23' font-family='sans-serif' font-size='20' font-weight='700' text-anchor='middle' fill='white'%3ES%3C/text%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="__SWAGGERIZER_BASE__/app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">s</span>
+        <div>
+          <h1>swaggerizer</h1>
+          <p class="brand-sub">Live scenario control</p>
+        </div>
+      </div>
+      <div class="stats" id="stats" aria-live="polite"></div>
+      <div class="actions">
+        <span class="conn" id="conn" title="Connection to the swaggerizer server">
+          <span class="conn-dot" aria-hidden="true"></span><span class="conn-text">Connecting…</span>
+        </span>
+        <button type="button" class="btn" id="reload-btn" title="Re-read spec files from disk">
+          Reload specs
+        </button>
+        <button type="button" class="btn btn-ghost" id="reset-all-btn" title="Restore every endpoint to its default response">
+          Reset all
+        </button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" aria-label="Specs and filters">
+        <section class="panel">
+          <h2 class="panel-title">Specs</h2>
+          <p class="panel-hint">Switch whole OpenAPI / Swagger files on or off. Where two enabled specs declare the same route, the one listed first wins.</p>
+          <ul class="spec-list" id="spec-list"></ul>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">Filter</h2>
+          <label class="field">
+            <span class="sr-only">Filter endpoints</span>
+            <input type="search" id="filter-text" placeholder="Route, operationId, tag or example…" autocomplete="off" />
+          </label>
+          <div class="method-filters" id="method-filters" role="group" aria-label="Filter by HTTP method"></div>
+          <label class="check">
+            <input type="checkbox" id="filter-modified" />
+            <span>Only changed from default</span>
+          </label>
+        </section>
+      </aside>
+
+      <main class="content" id="content" aria-live="off">
+        <div class="empty" id="loading">Loading scenarios…</div>
+      </main>
+
+      <aside class="activity" aria-label="Recent mock requests">
+        <div class="activity-head">
+          <h2 class="panel-title">Live requests</h2>
+          <button type="button" class="btn btn-small btn-ghost" id="clear-log-btn">Clear</button>
+        </div>
+        <ol class="log" id="log"></ol>
+        <p class="log-empty" id="log-empty">Requests to the mock API appear here as they happen.</p>
+      </aside>
+    </div>
+
+    <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+    <script src="__SWAGGERIZER_BASE__/app.js"></script>
+  </body>
+</html>

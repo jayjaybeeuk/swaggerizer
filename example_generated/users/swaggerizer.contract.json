@@ -1,0 +1,235 @@
+{
+  "swaggerizer": 1,
+  "specId": "users",
+  "title": "Users",
+  "version": "2.1.0",
+  "operations": {
+    "POST /login": {
+      "method": "POST",
+      "route": "/login",
+      "operationId": "login",
+      "parameters": {},
+      "requestBody": {
+        "required": true,
+        "contentTypes": [
+          "application/json"
+        ],
+        "schema": {
+          "type": "object",
+          "properties": {
+            "username": {
+              "type": "string"
+            },
+            "password": {
+              "type": "string",
+              "format": "password"
+            }
+          },
+          "required": [
+            "password",
+            "username"
+          ]
+        }
+      },
+      "responses": {
+        "200": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "token": {
+                "type": "string"
+              },
+              "expiresIn": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "token"
+            ]
+          }
+        },
+        "401": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        },
+        "423": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        }
+      }
+    },
+    "POST /logout": {
+      "method": "POST",
+      "route": "/logout",
+      "operationId": "logout",
+      "parameters": {},
+      "responses": {
+        "204": {
+          "contentTypes": []
+        }
+      }
+    },
+    "GET /users/{}": {
+      "method": "GET",
+      "route": "/users/{userId}",
+      "operationId": "getUser",
+      "parameters": {
+        "path:#0": {
+          "name": "userId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "email": {
+                "type": "string",
+                "format": "email"
+              },
+              "displayName": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "customer",
+                  "admin"
+                ]
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "manager": {
+                "circular": "User"
+              }
+            },
+            "required": [
+              "email",
+              "id",
+              "role"
+            ]
+          }
+        },
+        "404": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        }
+      }
+    },
+    "GET /users/me": {
+      "method": "GET",
+      "route": "/users/me",
+      "operationId": "getCurrentUser",
+      "parameters": {},
+      "responses": {
+        "200": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "email": {
+                "type": "string",
+                "format": "email"
+              },
+              "displayName": {
+                "type": "string"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "customer",
+                  "admin"
+                ]
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "manager": {
+                "circular": "User"
+              }
+            },
+            "required": [
+              "email",
+              "id",
+              "role"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "generatedAt": "2026-11-14T17:20:07.996Z"
+}

@@ -1,0 +1,179 @@
+openapi: 3.0.3
+info:
+  title: Petstore
+  version: 1.0.0
+  description: >
+    OpenAPI 3.0 example with named response examples. Every named example shows up as a switchable
+    scenario in the Swaggerizer admin page and debug menu.
+servers:
+  - url: https://petstore.example.com/v1
+tags:
+  - name: pets
+    description: Everything about your pets
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      summary: List all pets
+      tags: [pets]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: How many items to return at one time (max 100)
+          schema:
+            type: integer
+            format: int32
+            maximum: 100
+      responses:
+        "200":
+          description: A paged array of pets
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pets"
+              examples:
+                threePets:
+                  summary: Three pets
+                  value:
+                    - { id: 1, name: Rex, species: dog, tag: good-boy }
+                    - { id: 2, name: Tom, species: cat }
+                    - { id: 3, name: Polly, species: bird, tag: talks }
+                emptyList:
+                  summary: No pets yet
+                  value: []
+        "500":
+          description: Unexpected error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: 500
+                message: The pet database is on fire
+    post:
+      operationId: createPet
+      summary: Create a pet
+      tags: [pets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewPet"
+      responses:
+        "201":
+          description: Pet created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"
+              example: { id: 4, name: Nibbles, species: hamster }
+        "400":
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationError"
+              examples:
+                missingName:
+                  value:
+                    errorList:
+                      - { fieldName: name, message: Name is required }
+                badSpecies:
+                  value:
+                    errorList:
+                      - { fieldName: species, message: We do not stock dragons }
+  /pets/{petId}:
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        description: The id of the pet to retrieve
+        schema:
+          type: integer
+          format: int64
+    get:
+      operationId: showPetById
+      summary: Info for a specific pet
+      tags: [pets]
+      responses:
+        "200":
+          description: Expected response to a valid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"
+              examples:
+                dog:
+                  value: { id: 1, name: Rex, species: dog, tag: good-boy }
+                cat:
+                  value: { id: 2, name: Tom, species: cat }
+        "404":
+          description: Pet not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { code: 404, message: No pet with that id }
+    delete:
+      operationId: deletePet
+      summary: Remove a pet
+      tags: [pets]
+      responses:
+        "204":
+          description: Pet removed
+        "404":
+          description: Pet not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  schemas:
+    NewPet:
+      type: object
+      required: [name, species]
+      properties:
+        name:
+          type: string
+        species:
+          type: string
+          enum: [dog, cat, bird, hamster]
+        tag:
+          type: string
+    Pet:
+      allOf:
+        - type: object
+          required: [id]
+          properties:
+            id:
+              type: integer
+              format: int64
+        - $ref: "#/components/schemas/NewPet"
+    Pets:
+      type: array
+      maxItems: 100
+      items:
+        $ref: "#/components/schemas/Pet"
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+    ValidationError:
+      type: object
+      properties:
+        errorList:
+          type: array
+          items:
+            type: object
+            properties:
+              fieldName:
+                type: string
+              message:
+                type: string

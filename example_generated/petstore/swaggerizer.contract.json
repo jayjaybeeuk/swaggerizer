@@ -1,0 +1,296 @@
+{
+  "swaggerizer": 1,
+  "specId": "petstore",
+  "title": "Petstore",
+  "version": "1.0.0",
+  "operations": {
+    "GET /pets": {
+      "method": "GET",
+      "route": "/pets",
+      "operationId": "listPets",
+      "parameters": {
+        "query:limit": {
+          "name": "limit",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "species": {
+                  "type": "string",
+                  "enum": [
+                    "dog",
+                    "cat",
+                    "bird",
+                    "hamster"
+                  ]
+                },
+                "tag": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "species"
+              ]
+            }
+          }
+        },
+        "500": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "integer",
+                "format": "int32"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        }
+      }
+    },
+    "POST /pets": {
+      "method": "POST",
+      "route": "/pets",
+      "operationId": "createPet",
+      "parameters": {},
+      "requestBody": {
+        "required": true,
+        "contentTypes": [
+          "application/json"
+        ],
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "species": {
+              "type": "string",
+              "enum": [
+                "dog",
+                "cat",
+                "bird",
+                "hamster"
+              ]
+            },
+            "tag": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "species"
+          ]
+        }
+      },
+      "responses": {
+        "201": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "name": {
+                "type": "string"
+              },
+              "species": {
+                "type": "string",
+                "enum": [
+                  "dog",
+                  "cat",
+                  "bird",
+                  "hamster"
+                ]
+              },
+              "tag": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "species"
+            ]
+          }
+        },
+        "400": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "errorList": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "fieldName": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "GET /pets/{}": {
+      "method": "GET",
+      "route": "/pets/{petId}",
+      "operationId": "showPetById",
+      "parameters": {
+        "path:#0": {
+          "name": "petId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "name": {
+                "type": "string"
+              },
+              "species": {
+                "type": "string",
+                "enum": [
+                  "dog",
+                  "cat",
+                  "bird",
+                  "hamster"
+                ]
+              },
+              "tag": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "species"
+            ]
+          }
+        },
+        "404": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "integer",
+                "format": "int32"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        }
+      }
+    },
+    "DELETE /pets/{}": {
+      "method": "DELETE",
+      "route": "/pets/{petId}",
+      "operationId": "deletePet",
+      "parameters": {
+        "path:#0": {
+          "name": "petId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "responses": {
+        "204": {
+          "contentTypes": []
+        },
+        "404": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "integer",
+                "format": "int32"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "generatedAt": "2026-11-14T17:20:07.962Z"
+}

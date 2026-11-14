@@ -1,0 +1,220 @@
+{
+  "swaggerizer": 1,
+  "specId": "orders",
+  "title": "Orders",
+  "version": "0.3.0",
+  "operations": {
+    "GET /orders": {
+      "method": "GET",
+      "route": "/orders",
+      "operationId": "listOrders",
+      "parameters": {
+        "query:status": {
+          "name": "status",
+          "in": "query",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "paid",
+              "shipped",
+              "cancelled"
+            ]
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "paid",
+                    "shipped",
+                    "cancelled"
+                  ]
+                },
+                "total": {
+                  "type": "number"
+                },
+                "note": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "payment": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {},
+                        "last4": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "last4",
+                        "type"
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {},
+                        "reference": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "reference",
+                        "type"
+                      ]
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "status",
+                "total"
+              ]
+            }
+          }
+        },
+        "503": {
+          "contentTypes": [
+            "application/problem+json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "format": "uri"
+              },
+              "title": {
+                "type": "string"
+              },
+              "status": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      }
+    },
+    "GET /orders/{}": {
+      "method": "GET",
+      "route": "/orders/{orderId}",
+      "operationId": "getOrder",
+      "parameters": {
+        "path:#0": {
+          "name": "orderId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "contentTypes": [
+            "application/json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "paid",
+                  "shipped",
+                  "cancelled"
+                ]
+              },
+              "total": {
+                "type": "number"
+              },
+              "note": {
+                "type": "string",
+                "nullable": true
+              },
+              "payment": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {},
+                      "last4": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "last4",
+                      "type"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {},
+                      "reference": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "reference",
+                      "type"
+                    ]
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "status",
+              "total"
+            ]
+          }
+        },
+        "default": {
+          "contentTypes": [
+            "application/problem+json"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "format": "uri"
+              },
+              "title": {
+                "type": "string"
+              },
+              "status": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "generatedAt": "2026-11-14T17:20:07.920Z"
+}

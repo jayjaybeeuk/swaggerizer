@@ -1,0 +1,109 @@
+openapi: 3.1.0
+info:
+  title: Orders
+  version: 0.3.0
+  description: OpenAPI 3.1 example with nullable type arrays, oneOf and schema-level examples.
+servers:
+  - url: http://localhost:9000/orders-api
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+      summary: List orders
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/OrderStatus"
+      responses:
+        "200":
+          description: Orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Order"
+              examples:
+                mixed:
+                  summary: One of each status
+                  value:
+                    - { id: ord_1, status: pending, total: 12.5, note: null, payment: { type: card, last4: "4242" } }
+                    - { id: ord_2, status: shipped, total: 99, note: Leave at the door, payment: { type: invoice, reference: INV-2024-7 } }
+                none:
+                  value: []
+        "503":
+          description: Order service is down for maintenance
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://example.com/problems/maintenance
+                title: Back soon
+                status: 503
+  /orders/{orderId}:
+    get:
+      operationId: getOrder
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+        default:
+          description: Something went wrong
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+components:
+  schemas:
+    OrderStatus:
+      type: string
+      enum: [pending, paid, shipped, cancelled]
+    Order:
+      type: object
+      required: [id, status, total]
+      properties:
+        id:
+          type: string
+          examples: [ord_123]
+        status:
+          $ref: "#/components/schemas/OrderStatus"
+        total:
+          type: number
+          minimum: 0
+        note:
+          type: [string, "null"]
+        payment:
+          oneOf:
+            - $ref: "#/components/schemas/CardPayment"
+            - $ref: "#/components/schemas/InvoicePayment"
+    CardPayment:
+      type: object
+      required: [type, last4]
+      properties:
+        type: { const: card }
+        last4: { type: string }
+    InvoicePayment:
+      type: object
+      required: [type, reference]
+      properties:
+        type: { const: invoice }
+        reference: { type: string }
+    Problem:
+      type: object
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }

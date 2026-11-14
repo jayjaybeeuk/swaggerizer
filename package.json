@@ -1,0 +1,97 @@
+{
+  "name": "swaggerizer",
+  "version": "0.0.0-development",
+  "description": "A strategizer for OpenAPI/Swagger: live-switchable mock APIs with an admin page and debug menu, orval-generated clients and MSW mocks, and contract-change warnings before you regenerate",
+  "keywords": [
+    "openapi",
+    "swagger",
+    "mock",
+    "msw",
+    "orval",
+    "mock-server",
+    "api-mocking",
+    "contract-testing",
+    "breaking-changes"
+  ],
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "swaggerizer": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./msw": {
+      "types": "./dist/msw.d.ts",
+      "import": "./dist/msw.mjs",
+      "require": "./dist/msw.js"
+    },
+    "./debug-menu": {
+      "types": "./dist/debug-menu.d.ts",
+      "import": "./dist/debug-menu.mjs",
+      "require": "./dist/debug-menu.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "rollup -c",
+    "typecheck": "tsc --noEmit",
+    "pretest": "npm run build",
+    "test": "tsx --test test/*.test.ts",
+    "prepare": "npm run build",
+    "example": "node ./dist/cli.js serve --folder ./example_specs --port 8080 --generated ./example_generated --watch",
+    "example:generate": "node ./dist/cli.js generate --folder ./example_specs --output ./example_generated --runtime-import ./src/msw --yes",
+    "example:diff": "node ./dist/cli.js diff --folder ./example_specs_next --output ./example_generated",
+    "example:browser": "node examples/browser/build.mjs"
+  },
+  "author": "James Bolton <james@james-bolton.com>",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jayjaybeeuk/swaggerizer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jayjaybeeuk/swaggerizer/issues"
+  },
+  "homepage": "https://github.com/jayjaybeeuk/swaggerizer#readme",
+  "dependencies": {
+    "@apidevtools/swagger-parser": "^13.1.0",
+    "orval": "^8.47.0",
+    "swagger2openapi": "^7.0.8",
+    "yargs": "^18.2.0"
+  },
+  "peerDependencies": {
+    "msw": "^2.0.0 || ^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "msw": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@faker-js/faker": "^10.6.0",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-typescript": "^12.3.1",
+    "@semantic-release/changelog": "^7.0.0",
+    "@semantic-release/git": "^11.0.1",
+    "@types/node": "^26.6.6",
+    "@types/yargs": "^17.0.35",
+    "esbuild": "^0.28.2",
+    "msw": "^3.0.5",
+    "rollup": "^4.68.2",
+    "semantic-release": "^25.0.9",
+    "tslib": "^2.9.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}

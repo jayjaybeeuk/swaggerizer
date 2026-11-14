@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Swaggerizer browser demo</title>
+    <style>
+      :root { color-scheme: light dark; font: 15px/1.5 system-ui, sans-serif; }
+      body { margin: 0 auto; max-width: 760px; padding: 24px 16px 120px; }
+      h1 { font-size: 22px; margin: 0 0 4px; }
+      p { color: GrayText; margin: 0 0 16px; }
+      .row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+      button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid #999; background: Canvas; color: CanvasText; cursor: pointer; }
+      pre { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 8px; overflow: auto; min-height: 120px; }
+      code { font-family: ui-monospace, Menlo, monospace; }
+    </style>
+  </head>
+  <body>
+    <h1>Swaggerizer browser demo</h1>
+    <p>
+      These buttons call the orval-generated client. MSW answers with whatever the debug menu (bottom right,
+      or <code>Alt+Shift+S</code>) says. Add <code>?server=http://localhost:8080/swaggerizer</code> to follow a running
+      Swaggerizer admin page instead.
+    </p>
+    <div class="row">
+      <button data-call="listPets">listPets()</button>
+      <button data-call="showPetById">showPetById(1)</button>
+      <button data-call="createPet">createPet()</button>
+      <button data-call="login">login()</button>
+      <button data-call="getCurrentUser">getCurrentUser()</button>
+    </div>
+    <pre id="out">Click a button…</pre>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
