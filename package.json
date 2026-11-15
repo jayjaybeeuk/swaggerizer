@@ -88,8 +88,6 @@
     "@faker-js/faker": "^10.6.0",
     "@rollup/plugin-node-resolve": "^16.0.3",
     "@rollup/plugin-typescript": "^12.3.1",
-    "@semantic-release/changelog": "^7.0.0",
-    "@semantic-release/git": "^11.0.1",
     "@types/node": "^26.6.6",
     "@types/yargs": "^17.0.35",
     "esbuild": "^0.28.2",
