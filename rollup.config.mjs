@@ -1,7 +1,7 @@
 import typescript from "@rollup/plugin-typescript";
 import resolve from "@rollup/plugin-node-resolve";
 import { builtinModules } from "node:module";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, rmSync } from "node:fs";
 
 const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
 const externals = [...Object.keys(pkg.dependencies || {}), ...Object.keys(pkg.peerDependencies || {})];
@@ -9,6 +9,15 @@ const builtins = [...builtinModules, ...builtinModules.map(m => `node:${m}`)];
 
 const isExternal = id =>
   builtins.includes(id) || id.startsWith("node:") || externals.some(dep => id === dep || id.startsWith(dep + "/"));
+
+// Empties dist before building: chunk names are content-hashed, so without this every build
+// leaves the previous chunks behind and they end up in the npm package.
+const cleanDist = () => ({
+  name: "clean-dist",
+  buildStart() {
+    rmSync("dist", { recursive: true, force: true });
+  }
+});
 
 // Ships the static admin page (src/ui) next to the bundles as dist/ui.
 const copyAdminUi = () => ({
@@ -34,6 +43,7 @@ export default [
       { dir: "dist", format: "es", sourcemap: true, entryFileNames: "[name].mjs", chunkFileNames: "chunks/[name]-[hash].mjs" }
     ],
     plugins: [
+      cleanDist(),
       resolve({ preferBuiltins: true }),
       typescript({ tsconfig: "./tsconfig.json", declaration: true, declarationDir: "./dist", outDir: "./dist" }),
       copyAdminUi()
