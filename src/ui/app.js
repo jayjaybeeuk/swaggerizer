@@ -103,6 +103,21 @@
     return "status status-" + ("12345".indexOf(first) >= 0 ? first : "5");
   }
 
+  /* Request validation: one chip whose tooltip lists the contract violations. */
+  function validationChip(validation) {
+    if (!validation) return null;
+    var issues = validation.request || [];
+    if (!issues.length && !validation.skipped) return null;
+    var title = issues.length
+      ? issues.map(function (issue) { return issue.location + ": " + issue.message; }).join("\n")
+      : "Not checked: " + validation.skipped;
+    return h("span", {
+      class: "log-invalid",
+      title: title,
+      text: issues.length ? "⚠ " + issues.length : "?"
+    });
+  }
+
   function methodBadge(method) {
     var m = String(method).toLowerCase();
     return h("span", { class: "method method-" + m, text: m.toUpperCase() });
@@ -258,10 +273,19 @@
     var active = ops.filter(function (o) { return o.active; });
     var changed = active.filter(function (o) { return o.modified; }).length;
     var breaking = (ui.data.changes || []).reduce(function (n, r) { return n + r.counts.breaking; }, 0);
+    var validation = ui.data.validation || {};
+    var mode = validation.mode || "off";
+    var perSpec = validation.perSpec || {};
+    var specModes = Object.keys(perSpec).map(function (id) { return perSpec[id]; }).filter(function (m) { return m !== mode; });
+    // Shown only when something is checked; specs that differ from the server mode are listed after it.
+    var showMode = mode !== "off" || specModes.some(function (m) { return m !== "off"; });
+    var modeTitle = "Requests are checked against the spec: off, warn or enforce" +
+      Object.keys(perSpec).map(function (id) { return "\n" + id + ": " + perSpec[id]; }).join("");
     el.stats.replaceChildren(
       h("span", null, h("strong", { text: String(enabled) }), " / " + specs.length + " specs on"),
       h("span", null, h("strong", { text: String(active.length) }), " endpoints served"),
       h("span", null, h("strong", { text: String(changed) }), " switched"),
+      showMode ? h("span", { title: modeTitle }, "validation ", h("strong", { text: mode + (specModes.length ? " +" + specModes.length : "") })) : null,
       breaking ? h("span", { class: "status-5" }, h("strong", { text: String(breaking) }), " breaking change" + (breaking === 1 ? "" : "s")) : null
     );
   }
@@ -711,6 +735,7 @@
       return h("li", { class: ui.freshLogIds.has(entry.id) ? "is-new" : "" },
         methodBadge(entry.method),
         h("span", { class: statusClass(entry.status), text: entry.status ? String(entry.status) : "→" }),
+        validationChip(entry.validation),
         h("span", { class: "log-path", text: entry.path }),
         h("span", { class: "log-meta" },
           entry.source === "msw" ? h("span", { class: "log-source", title: "Answered by MSW in a browser or test", text: "msw" }) : null,

@@ -17,6 +17,15 @@ import {
   SCENARIO_HEADER
 } from "./scenario";
 import { analyseSpecFile, listSpecFiles, specIdFor, type AnalysedSpec } from "./spec";
+import {
+  createValidator,
+  hasRequestSchema,
+  matchesIgnore,
+  parseValidationMode,
+  unmatchedIgnore,
+  VALIDATION_HEADER,
+  type Validator
+} from "./validate";
 import { CONTRACT_FILE, isUrl, outputDirs } from "./paths";
 import {
   applyOverlays,
@@ -36,7 +45,10 @@ import type {
   ScenarioMap,
   ScenarioSelection,
   SpecSummary,
-  SwaggerizerState
+  SwaggerizerState,
+  ValidationInfo,
+  ValidationMode,
+  ValidationSummary
 } from "./types";
 
 const REQUEST_LOG_LIMIT = 300;
@@ -67,6 +79,10 @@ export interface SwaggerizerOptions {
   delay?: number;
   /** Requests that match no operation are proxied here (e.g. a legacy mock server during migration). */
   fallback?: string;
+  /** Validate matched requests against the spec: "off" (default), "warn" or "enforce". */
+  validate?: ValidationMode;
+  /** Per-spec validation modes, keyed by spec id. */
+  specValidation?: Record<string, ValidationMode>;
   silent?: boolean;
 }
 
@@ -92,6 +108,8 @@ export interface Swaggerizer {
   getRequestLog: (sinceId?: number) => RequestLogEntry[];
   recordRequest: (entry: Omit<RequestLogEntry, "id" | "time">) => RequestLogEntry;
   getSpecDocument: (id: string) => any;
+  /** Active validation mode and which operations declare something to check. */
+  getValidationInfo: () => ValidationInfo;
   listen: (port?: number, host?: string) => Promise<http.Server>;
   close: () => Promise<void>;
   readonly endpoint: string;
@@ -190,6 +208,42 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
   const ordered = () => [...specs.values()];
   const states = () => buildOperationStates(ordered(), scenarios, { defaultDelay: options.delay });
 
+  /* ------------------------------------------------------------------ request validation */
+
+  const validators = new Map<string, Validator>();
+
+  function validatorFor(spec: SpecRecord): Validator {
+    let validator = validators.get(spec.id);
+    if (!validator) {
+      validator = createValidator(spec.doc, spec.id, spec.specVersion);
+      validators.set(spec.id, validator);
+    }
+    return validator;
+  }
+
+  /** Header override, then `validateIgnore`, then the spec's mode, then the server's. */
+  function validationModeFor(op: OperationState, header: string | string[] | undefined): ValidationMode {
+    const fromHeader = parseValidationMode(Array.isArray(header) ? header[0] : header);
+    if (fromHeader) return fromHeader;
+    const cfg = configFor(op.specId);
+    if (matchesIgnore(cfg.validateIgnore, op)) return "off";
+    return cfg.validate ?? options.specValidation?.[op.specId] ?? options.validate ?? "off";
+  }
+
+  function validationInfo(operations: OperationState[] = states()): ValidationInfo {
+    const perSpec: Record<string, ValidationMode> = { ...(options.specValidation || {}) };
+    for (const [id, cfg] of Object.entries(specConfigs)) if (cfg.validate) perSpec[id] = cfg.validate;
+    return {
+      mode: options.validate ?? "off",
+      perSpec,
+      operations: operations.map(op => {
+        const spec = specs.get(op.specId);
+        // Read straight from the document: reporting this must not build an Ajv instance while validation is off.
+        return { specId: op.specId, key: op.key, hasRequestSchema: spec ? hasRequestSchema(spec.doc, op) : false };
+      })
+    };
+  }
+
   function summarise(spec: SpecRecord): SpecSummary {
     return {
       id: spec.id,
@@ -215,14 +269,16 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
       ...snapshotReports,
       ...[...previousReports.values()].filter(r => r.changes.length > 0)
     ];
+    const operations = states();
     return {
       endpoint,
       ...(options.delay ? { defaultDelay: options.delay } : {}),
       ...(options.fallback ? { fallback: options.fallback } : {}),
       specs: ordered().map(summarise),
-      operations: states(),
+      operations,
       lastReload,
-      changes
+      changes,
+      validation: validationInfo(operations)
     };
   }
 
@@ -351,6 +407,9 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
         for (const key of unmatchedKeys(cfg.handlers, analysed.operations)) {
           analysed.warnings.push(`Custom handler '${key}' matches no operation`);
         }
+        for (const key of unmatchedIgnore(cfg.validateIgnore, analysed.operations)) {
+          analysed.warnings.push(`validateIgnore entry '${key}' matches no operation`);
+        }
         const enabled = before ? before.enabled : !disabled.has(id);
         next.set(id, { ...analysed, enabled, loadedAt: new Date().toISOString() });
         if (before && !before.error) {
@@ -382,6 +441,8 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
     }
 
     specs.clear();
+    // Compiled validators hold the old documents; rebuild them lazily against the new ones.
+    validators.clear();
     for (const [id, spec] of next) specs.set(id, spec);
     for (const id of previousReports.keys()) if (!specs.has(id)) previousReports.delete(id);
     refreshSnapshotReports();
@@ -458,17 +519,18 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
     res: http.ServerResponse,
     target: string,
     relativePath: string,
-    search: string
+    search: string,
+    bufferedBody?: Buffer
   ): Promise<number> {
     const upstream = target.replace(/\/+$/, "") + relativePath + search;
     const headers: Record<string, string> = {};
     for (const [name, value] of Object.entries(req.headers)) {
       if (value === undefined) continue;
-      if (["host", "connection", "content-length", "accept-encoding", SCENARIO_HEADER].includes(name)) continue;
+      if (["host", "connection", "content-length", "accept-encoding", SCENARIO_HEADER, VALIDATION_HEADER].includes(name)) continue;
       headers[name] = Array.isArray(value) ? value.join(", ") : value;
     }
     const method = (req.method || "GET").toUpperCase();
-    const body = method === "GET" || method === "HEAD" ? undefined : await readBody(req);
+    const body = method === "GET" || method === "HEAD" ? undefined : bufferedBody ?? (await readBody(req));
     const response = await fetch(upstream, { method, headers, body: body && body.length ? new Uint8Array(body) : undefined, redirect: "manual" });
     const out = Buffer.from(await response.arrayBuffer());
     res.statusCode = response.status;
@@ -494,22 +556,82 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
     const spec = specs.get(op.specId)!;
     const cfg = configFor(op.specId);
     const override = parseScenarioHeader(req.headers[SCENARIO_HEADER] as string | undefined);
-    const entry = { method: method.toUpperCase(), path: url.pathname + url.search, route: op.route, specId: op.specId, source: "server" as const };
-
+    const mode = validationModeFor(op, req.headers[VALIDATION_HEADER]);
+    const resolved = resolveResponse(op, override);
     const custom = lookupByOperation(cfg.handlers, op);
-    if (custom && !override && !op.modified) {
-      const raw = method === "get" || method === "head" ? undefined : (await readBody(req)).toString("utf8");
-      let body: unknown = raw;
-      if (raw !== undefined) {
-        try {
-          body = raw.trim() ? JSON.parse(raw) : undefined;
-        } catch {
-          body = raw;
-        }
+    const wantsHandler = Boolean(custom) && !override && !op.modified;
+    const sendsBody = method !== "get" && method !== "head";
+    // The request stream can only be read once: buffer it when validation, a custom handler or the
+    // proxy needs it, then hand the same buffer to each of them.
+    const buffered = sendsBody && (mode !== "off" || wantsHandler || resolved.kind === "proxy")
+      ? await readBody(req)
+      : undefined;
+    const contentType = req.headers["content-type"] as string | undefined;
+
+    // What a custom handler has always received: parsed JSON, or the raw text when it is not JSON.
+    let handlerBody: unknown;
+    if (buffered && buffered.length > 0) {
+      const text = buffered.toString("utf8");
+      try {
+        handlerBody = text.trim() ? JSON.parse(text) : undefined;
+      } catch {
+        handlerBody = text;
       }
-      const params = candidatePaths(url.pathname, spec.basePaths, cfg.aliases || {})
-        .map(p => extractParams(op.route, p))
-        .find(p => Object.keys(p).length > 0) ?? {};
+    }
+
+    let validationBody: unknown;
+    let bodyError: string | undefined;
+    // A whitespace-only body is no body, for validation as for the handler.
+    if (mode !== "off" && buffered && buffered.toString("utf8").trim() !== "") {
+      try {
+        validationBody = parseRequestBody(buffered, contentType);
+      } catch (err: any) {
+        bodyError = err?.message ? String(err.message) : String(err);
+      }
+    }
+
+    const pathParams = candidatePaths(url.pathname, spec.basePaths, cfg.aliases || {})
+      .map(p => extractParams(op.route, p))
+      .find(p => Object.keys(p).length > 0) ?? {};
+
+    let summary: ValidationSummary | undefined;
+    if (mode !== "off") {
+      summary = validatorFor(spec).validateRequest(op, {
+        params: pathParams,
+        query: url.searchParams,
+        headers: req.headers,
+        ...(validationBody !== undefined ? { body: validationBody } : {}),
+        ...(bodyError ? { bodyError } : {}),
+        ...(contentType ? { contentType } : {})
+      });
+      if (summary.request.length === 0 && !summary.skipped) summary = undefined;
+    }
+
+    const entry = {
+      method: method.toUpperCase(),
+      path: url.pathname + url.search,
+      route: op.route,
+      specId: op.specId,
+      source: "server" as const,
+      ...(summary ? { validation: summary } : {})
+    };
+
+    if (summary && mode === "enforce" && summary.request.length > 0) {
+      res.setHeader("X-Swaggerizer-Validation", "failed");
+      sendJson(res, 400, {
+        error: "Request validation failed",
+        operation: `${op.method.toUpperCase()} ${op.route}`,
+        specId: op.specId,
+        issues: summary.request
+      });
+      recordRequest({ ...entry, status: 400, example: "validation", ms: Date.now() - started });
+      return true;
+    }
+    if (summary) res.setHeader("X-Swaggerizer-Validation", "warning");
+
+    if (custom && wantsHandler) {
+      const body = handlerBody;
+      const params = pathParams;
       const headers = Object.fromEntries(
         Object.entries(req.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : String(v ?? "")])
       );
@@ -535,7 +657,6 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
       }
     }
 
-    const resolved = resolveResponse(op, override);
     if (resolved.delay > 0) await sleep(resolved.delay);
 
     if (resolved.kind === "proxy") {
@@ -547,7 +668,7 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
       }
       const relative = relativeToBase(url.pathname, spec.basePaths, cfg.aliases || {});
       try {
-        const status = await proxy(req, res, target, relative, url.search);
+        const status = await proxy(req, res, target, relative, url.search, buffered);
         recordRequest({ ...entry, status, example: "proxy", ms: Date.now() - started });
       } catch (err: any) {
         sendJson(res, 502, { error: `Proxy to ${target} failed: ${err?.message ?? err}` });
@@ -585,7 +706,8 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
     reload,
     getRequestLog,
     recordRequest,
-    getSpecDocument: id => specs.get(id)?.doc
+    getSpecDocument: id => specs.get(id)?.doc,
+    getValidation: validationInfo
   });
 
   function handler(req: http.IncomingMessage, res: http.ServerResponse, next?: () => void) {
@@ -593,7 +715,7 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
       res.setHeader("Access-Control-Allow-Origin", (req.headers.origin as string) || "*");
       res.setHeader("Vary", "Origin");
       res.setHeader("Access-Control-Allow-Credentials", "true");
-      res.setHeader("Access-Control-Expose-Headers", "X-Swaggerizer-Scenario, X-Swaggerizer-Proxied");
+      res.setHeader("Access-Control-Expose-Headers", "X-Swaggerizer-Scenario, X-Swaggerizer-Proxied, X-Swaggerizer-Validation");
       if (req.method === "OPTIONS" && req.headers["access-control-request-method"]) {
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS");
         res.setHeader("Access-Control-Allow-Headers", (req.headers["access-control-request-headers"] as string) || "*");
@@ -686,6 +808,7 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
     getRequestLog,
     recordRequest,
     getSpecDocument: id => specs.get(id)?.doc,
+    getValidationInfo: validationInfo,
     listen,
     close,
     endpoint,

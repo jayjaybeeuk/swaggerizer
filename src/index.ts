@@ -31,6 +31,15 @@ export {
   SCENARIO_HEADER
 } from "./scenario";
 export { sampleFromSchema } from "./schema";
+export {
+  createValidator,
+  formatIssues,
+  parseValidationMode,
+  matchesIgnore,
+  VALIDATION_HEADER,
+  type Validator,
+  type ValidationInput
+} from "./validate";
 export { CONTRACT_FILE, WRAPPER_FILE, outputDirs } from "./paths";
 export * from "./config";
 export { loadConfig, findConfigFile, aliasesFromTsconfig } from "./load-config";

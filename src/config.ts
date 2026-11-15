@@ -3,7 +3,7 @@
  * Browser-safe: a config file (and the fixtures it imports) can be shared with the MSW runtime.
  */
 import { operationKey } from "./scenario";
-import { GENERATED, type CatalogueOperation, type CatalogueResponse, type OperationState } from "./types";
+import { GENERATED, type CatalogueOperation, type CatalogueResponse, type OperationState, type ValidationMode } from "./types";
 
 /** One named scenario added to an operation from code, e.g. an existing typed fixture. */
 export interface ScenarioOverlay {
@@ -73,6 +73,10 @@ export interface SpecConfig {
   proxy?: string;
   scenarios?: ScenarioOverlays;
   handlers?: CustomHandlers;
+  /** Validate requests against this spec: overrides the top-level mode. */
+  validate?: ValidationMode;
+  /** Operations never validated: operationIds or `"METHOD /route"`. */
+  validateIgnore?: string[];
 }
 
 export interface SwaggerizerConfig {
@@ -94,6 +98,8 @@ export interface SwaggerizerConfig {
   runtimeImport?: string;
   /** tsconfig whose `paths` are used to resolve imports in this config file (default ./tsconfig.base.json or ./tsconfig.json). */
   tsconfig?: string;
+  /** Validate requests against the specs: "off" (default), "warn" or "enforce". */
+  validate?: ValidationMode;
 }
 
 export function defineConfig(config: SwaggerizerConfig): SwaggerizerConfig {
