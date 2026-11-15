@@ -6,6 +6,9 @@ name: Release
 #
 # main is protected (PRs only), so nothing is committed back: the version lives in the git tag,
 # on npm and in the GitHub Release notes. package.json stays at 0.0.0-development.
+#
+# The workflow is only half of the setup: npm must trust it. See docs/releasing.md, including the
+# "Allow npm publish" permission that a new trusted publisher does not get by default.
 on:
   push:
     branches: [main]
@@ -41,6 +44,7 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
+      # The OIDC token npm exchanges for a short-lived publish credential.
       id-token: write
     steps:
       - uses: actions/checkout@v7
@@ -48,9 +52,29 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           # No shared cache in the publishing job, to avoid cache poisoning.
+      # Trusted publishing lives in the npm CLI, which needs 11.5.1 or later. Node 24's bundled npm
+      # is already newer, but installing it explicitly keeps releases independent of the runner
+      # image - and prints the version, so the next person debugging auth can rule it out at a glance.
+      - name: Use an npm that can do trusted publishing
+        run: |
+          npm install --global npm@^11.5.1
+          npm --version
+      # npm only falls back to OIDC when it finds no token for the registry. A leftover secret would
+      # silently downgrade the release to token auth, or fail it with a confusing 403 when that
+      # token is missing, expired or read-only.
+      - name: Make sure nothing shadows the OIDC credential
+        run: |
+          if [ -n "${NODE_AUTH_TOKEN:-}" ] || [ -n "${NPM_TOKEN:-}" ]; then
+            echo "::error::NODE_AUTH_TOKEN/NPM_TOKEN is set for this job; npm would use it instead of OIDC."
+            exit 1
+          fi
       - run: npm ci
+      # What the registry has right now. A 403 below is then easy to tell apart from a package that
+      # does not exist yet, or one owned by a different account.
+      - name: Show the published versions
+        run: npm view swaggerizer version dist-tags --json || echo "swaggerizer has no published versions yet"
       - name: Semantic Release (Trusted Publishing OIDC)
         run: npx semantic-release
         env:
