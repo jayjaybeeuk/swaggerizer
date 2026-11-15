@@ -11,7 +11,9 @@ import type {
   RequestLogEntry,
   ScenarioSelection,
   SpecSummary,
-  SwaggerizerState
+  SwaggerizerState,
+  ValidationInfo,
+  ValidationSummary
 } from "./types";
 
 export interface AdminContext {
@@ -25,6 +27,7 @@ export interface AdminContext {
   getRequestLog: (sinceId?: number) => RequestLogEntry[];
   recordRequest: (entry: Omit<RequestLogEntry, "id" | "time">) => RequestLogEntry;
   getSpecDocument: (id: string) => any;
+  getValidation: () => ValidationInfo;
 }
 
 export interface AdminRequest {
@@ -45,6 +48,23 @@ function sendJson(res: http.ServerResponse, status: number, payload: unknown) {
 
 function blank(value: unknown): boolean {
   return value === undefined || value === null || value === "";
+}
+
+/** MSW reports request summaries to the live log; keep only the fields the page renders. */
+function toValidation(raw: any): ValidationSummary | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const text = (value: unknown, max = 200): string | undefined =>
+    typeof value === "string" && value !== "" ? value.slice(0, max) : undefined;
+  const request = (Array.isArray(raw.request) ? raw.request : [])
+    .slice(0, 20)
+    .map((issue: any) => ({
+      location: text(issue?.location, 120) ?? "request",
+      message: text(issue?.message) ?? "is invalid",
+      ...(text(issue?.keyword, 40) ? { keyword: text(issue?.keyword, 40) } : {})
+    }));
+  const skipped = text(raw.skipped, 60);
+  if (request.length === 0 && !skipped) return undefined;
+  return { request, ...(skipped ? { skipped } : {}) };
 }
 
 /**
@@ -148,6 +168,11 @@ export function registerAdmin(ctx: AdminContext) {
         return true;
       }
 
+      if (method === "GET" && path === "/api/validation") {
+        sendJson(res, 200, ctx.getValidation());
+        return true;
+      }
+
       if (path === "/api/log") {
         if (method === "GET") {
           const since = Number(query.get("since") || 0);
@@ -157,8 +182,9 @@ export function registerAdmin(ctx: AdminContext) {
         if (method === "POST") {
           // Lets the MSW runtime report requests it answered in the browser or in tests.
           const items: any[] = Array.isArray(req.body) ? req.body : [req.body];
-          const entries = items.slice(0, 50).map(item =>
-            ctx.recordRequest({
+          const entries = items.slice(0, 50).map(item => {
+            const validation = toValidation(item?.validation);
+            return ctx.recordRequest({
               method: String(item?.method || "GET").toUpperCase(),
               path: String(item?.path || ""),
               ...(item?.route ? { route: String(item.route) } : {}),
@@ -166,9 +192,10 @@ export function registerAdmin(ctx: AdminContext) {
               example: String(item?.example || ""),
               ...(item?.specId ? { specId: String(item.specId) } : {}),
               ...(item?.ms !== undefined ? { ms: Number(item.ms) } : {}),
+              ...(validation ? { validation } : {}),
               source: "msw"
-            })
-          );
+            });
+          });
           sendJson(res, 200, { recorded: entries.length });
           return true;
         }

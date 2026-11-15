@@ -1,6 +1,6 @@
 # Request validation
 
-**Status:** proposal · **Target release:** minor (`feat:`)
+**Status:** implemented (phase 1) · **Release:** minor (`feat:`)
 
 Swaggerizer loads a spec, answers requests from it and warns when the spec drifts from the generated
 code. It never checks the requests it receives against that spec. This document specifies adding
@@ -257,18 +257,21 @@ import Ajv2020 from "ajv/dist/2020";
 import addFormats from "ajv-formats";
 
 export interface Validator {
-  validateRequest(op: CatalogueOperation, input: ValidationInput): ValidationIssue[];
-  /** Phase 2. */
-  validateResponse(op: CatalogueOperation, body: unknown, contentType?: string): ValidationIssue[];
+  validateRequest(op: CatalogueOperation, input: ValidationInput): ValidationSummary;
+  /** True when the operation declares any parameter or a request body. */
+  hasRequestSchema(op: CatalogueOperation): boolean;
+  /** Phase 2: validateResponse(op, body, contentType). */
 }
 
 export interface ValidationInput {
-  /** Path relative to any base path, already matched to `op.route`. */
-  path: string;
+  /** Path parameters, already extracted for the matched route. */
+  params: Record<string, string>;
   query: URLSearchParams;
   headers: Record<string, string | string[] | undefined>;
-  /** Parsed JSON, parsed form fields, or undefined when the request had no body. */
+  /** Parsed JSON or form fields; undefined when the request carried no body. */
   body?: unknown;
+  /** Set when the body could not be parsed; reported as an issue rather than guessed at. */
+  bodyError?: string;
   contentType?: string;
 }
 
@@ -288,18 +291,18 @@ with 200 operations pays for the operations that are actually called.
 internal ones stay as `#/components/...`, and Swagger 2 has been converted to OpenAPI 3. So one
 code path handles both formats.
 
-Register the whole document once, then compile sub-schemas by JSON Pointer rather than dereferencing
-(dereferencing would break recursive schemas, which `src/schema.ts` has to handle specially for
-sampling):
+Register the whole document once under a `urn:swaggerizer:<id>` base, then compile each operation's
+parameter and body schema standalone, with its internal `#/...` refs rewritten to point at that base.
+Prefer that over dereferencing: dereferencing would break recursive schemas, which `src/schema.ts`
+has to handle specially for sampling.
 
 ```ts
-ajv.addSchema(docForAjv, specId);                       // specId doubles as the schema's $id
-const ref = `${specId}#/paths/${esc(op.route)}/${op.method}/requestBody/content/${esc(media)}/schema`;
-const validate = ajv.getSchema(ref) ?? ajv.compile({ $ref: ref });
+ajv.addSchema(docForAjv, base);                                 // base = `urn:swaggerizer:${specId}`
+const validate = ajv.compile(withBaseRefs(schema, base));       // "#/components/…" → `${base}#/components/…`
 ```
 
-`esc()` is RFC 6901 escaping (`~` → `~0`, `/` → `~1`), which every path template and media type
-needs: `/pets/{petId}` becomes `~1pets~1{petId}`, `application/json` becomes `application~1json`.
+A schema Ajv refuses to compile is reported as `skipped: "invalid-schema"` for that operation, never
+as a failed request.
 
 `docForAjv` is a deep clone of `spec.doc` with one rewrite: OpenAPI 3.0 `nullable: true` becomes
 `type: [<type>, "null"]` (or `anyOf: [schema, { type: "null" }]` when the schema is a `$ref`/`allOf`,
@@ -426,11 +429,11 @@ orval, and is the only addition this design needs.
 
 ## Rollout checklist
 
-- [ ] `src/validate.ts` with unit tests (coercion table, pointer escaping, nullable rewrite, dialects)
-- [ ] `src/server.ts` wiring: mode resolution, single body read, `enforce` short-circuit, log field
-- [ ] config + CLI + `SwaggerizerOptions` + state surface
-- [ ] admin `GET /api/validation`, log sanitising, UI chip
-- [ ] `ajv` + `ajv-formats` in `dependencies`; confirm `npm run build` externalises them
-- [ ] README section and CLI block
-- [ ] `test/server.test.ts` rows 2–16 green; `npm run typecheck`, `npm test`
+- [x] `src/validate.ts` with unit tests (coercion table, ref rewriting, nullable rewrite, dialects)
+- [x] `src/server.ts` wiring: mode resolution, single body read, `enforce` short-circuit, log field
+- [x] config + CLI + `SwaggerizerOptions` + state surface
+- [x] admin `GET /api/validation`, log sanitising, UI chip
+- [x] `ajv` + `ajv-formats` in `dependencies`; `npm run build` externalises them
+- [x] README section and CLI block
+- [x] validation tests green; `npm run typecheck`, `npm test`
 - [ ] `npm run example` against `example_specs` with `--validate warn` to check the log stays readable

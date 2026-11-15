@@ -11,6 +11,7 @@ import { loadConfig } from "./load-config";
 import { pull } from "./pull";
 
 const FAIL_ON = ["breaking", "warning", "any", "none"] as const;
+const VALIDATE_MODES = ["off", "warn", "enforce"] as const;
 const useColor = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
 
 async function confirm(reports: ChangeReport[]): Promise<boolean> {
@@ -73,6 +74,10 @@ export async function run(argv = process.argv): Promise<void> {
           .option("proxy", { type: "string", describe: "upstream base URL for 'Real API' mode (default: each spec's servers URL)" })
           .option("delay", { type: "number", describe: "default latency for every operation, in ms" })
           .option("fallback", { type: "string", describe: "proxy requests that match no operation to this URL" })
+          .option("validate", {
+            choices: VALIDATE_MODES,
+            describe: "check requests against the spec: off (default), warn or enforce"
+          })
           .option("state-file", { type: "string", describe: "persist scenario choices to this JSON file" })
           .option("generated", { alias: "output", type: "string", describe: "generated code folder: warn when the specs drift from it" })
           .option("watch", { alias: "w", type: "boolean", default: false, describe: "reload specs when files change" })
@@ -91,6 +96,7 @@ export async function run(argv = process.argv): Promise<void> {
           proxy: args.proxy,
           delay: args.delay ?? config?.delay,
           fallback: args.fallback ?? config?.fallback,
+          validate: (args.validate as (typeof VALIDATE_MODES)[number] | undefined) ?? config?.validate,
           stateFile: args["state-file"] ?? config?.stateFile,
           generated: args.generated ?? config?.output,
           watch: args.watch,

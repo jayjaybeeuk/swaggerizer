@@ -156,11 +156,38 @@ export interface SwaggerizerState {
   operations: OperationState[];
   lastReload?: string;
   changes: ChangeReport[];
+  validation: ValidationInfo;
 }
 
 export interface ScenarioSelection extends Scenario {
   method: string;
   route: string;
+}
+
+/** How requests are checked against the spec: never, recorded only, or rejected with a 400. */
+export type ValidationMode = "off" | "warn" | "enforce";
+
+/** One contract violation found in a request. */
+export interface ValidationIssue {
+  /** Dotted location: "query.limit", "body.ownerId", "header.x-tenant". */
+  location: string;
+  message: string;
+  /** Ajv keyword: "required", "type", "enum", "format"… */
+  keyword?: string;
+}
+
+export interface ValidationSummary {
+  request: ValidationIssue[];
+  /** Why a check did not run: "unsupported-media-type", "object-style", "form-nesting", "invalid-schema". */
+  skipped?: string;
+}
+
+/** What the admin page and `GET {endpoint}/api/validation` report about the active configuration. */
+export interface ValidationInfo {
+  mode: ValidationMode;
+  /** Specs that override `mode`. */
+  perSpec: Record<string, ValidationMode>;
+  operations: Array<{ specId: string; key: string; hasRequestSchema: boolean }>;
 }
 
 export interface RequestLogEntry {
@@ -170,13 +197,15 @@ export interface RequestLogEntry {
   path: string;
   route?: string;
   status: number;
-  /** Variant served, or "custom" / "proxy" / "unmatched". */
+  /** Variant served, or "custom" / "proxy" / "unmatched" / "validation". */
   example: string;
   specId?: string;
   contentType?: string;
   /** "server" for the Node mock server, "msw" for requests reported by the MSW runtime. */
   source: "server" | "msw";
   ms?: number;
+  /** Present when validation ran and found issues, or could not check part of the request. */
+  validation?: ValidationSummary;
 }
 
 /* ------------------------------------------------------------------ contract change detection */

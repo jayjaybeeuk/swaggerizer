@@ -301,12 +301,39 @@ What is checked, judged from the point of view of code using the generated clien
 
 Renaming a path parameter (`/pets/{id}` → `/pets/{petId}`) isn't reported, because the generated call doesn't change.
 
+## Request validation
+
+`serve --validate enforce` checks every matched request against the spec and answers `400` when it does not fit, so the mock cannot prove an integration the real API will reject:
+
+```bash
+npx swaggerizer serve --folder ./specs --validate enforce
+```
+
+| Mode | What happens |
+| --- | --- |
+| `off` (default) | requests are not inspected |
+| `warn` | problems appear in the admin page's Live requests (`⚠ n`) and the request is answered normally |
+| `enforce` | problems answer `400` with the issues; the request is not proxied and custom handlers do not run |
+
+Checks cover path, query, header and cookie parameters and JSON or `x-www-form-urlencoded` request bodies. A media type the tool cannot parse is reported as skipped rather than failed. Set the mode per spec with `validate`, exempt individual operations with `validateIgnore`, or override it for one request with `X-Swaggerizer-Validation: off | warn | enforce`:
+
+```ts
+export default defineConfig({
+  validate: "warn",
+  specs: {
+    orders: { validate: "enforce", validateIgnore: ["POST /legacy/import"] }
+  }
+});
+```
+
+`GET {endpoint}/api/validation` reports the active mode and which operations declare something to check. Responses are not validated: the mock serves bodies taken from the spec itself.
+
 ## CLI
 
 ```
 swaggerizer serve     [--config <file>] [--folder <files|dirs|urls…>] [-H 'Name: value'] [--port 8080] [--host] [--endpoint swaggerizer]
                       [--no-ui] [--proxy <url>] [--delay <ms>] [--fallback <url>] [--state-file <file>]
-                      [--generated <dir>] [--watch] [--silent]
+                      [--generated <dir>] [--watch] [--validate off|warn|enforce] [--silent]
 swaggerizer generate  [--config <file>] [--folder …] [-H 'Name: value'] [--output src/api] [--client fetch] [--base-url <url>]
                       [--no-mock] [--state-file <file>] [--fail-on breaking|warning|any|none] [--yes]
                       [--runtime-import swaggerizer/msw] [--verbose]

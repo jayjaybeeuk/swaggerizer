@@ -217,3 +217,269 @@ describe("contract warnings in the server", () => {
     await sw.close();
   });
 });
+
+describe("request validation", () => {
+  const spec = {
+    openapi: "3.0.3",
+    info: { title: "Things", version: "1.0.0" },
+    paths: {
+      "/things": {
+        get: {
+          operationId: "listThings",
+          parameters: [
+            { name: "limit", in: "query", schema: { type: "integer", maximum: 100 } },
+            { name: "x-tenant", in: "header", required: true, schema: { type: "string" } }
+          ],
+          responses: { "200": { description: "ok", content: { "application/json": { example: [] } } } }
+        },
+        post: {
+          operationId: "createThing",
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: { $ref: "#/components/schemas/NewThing" } } }
+          },
+          responses: { "201": { description: "created", content: { "application/json": { example: { ok: true } } } } }
+        }
+      },
+      "/legacy": {
+        post: {
+          operationId: "importLegacy",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { type: "object", required: ["id"], properties: { id: { type: "integer" } } }
+              }
+            }
+          },
+          responses: { "201": { description: "ok", content: { "application/json": { example: { imported: true } } } } }
+        }
+      },
+      "/things/{id}": {
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "integer" } }],
+        get: {
+          operationId: "showThing",
+          responses: { "200": { description: "ok", content: { "application/json": { example: { id: 1 } } } } }
+        }
+      }
+    },
+    components: {
+      schemas: { NewThing: { type: "object", required: ["name"], properties: { name: { type: "string" } } } }
+    }
+  };
+
+  let sw: Swaggerizer;
+  let plain: Swaggerizer;
+  let ignored: Swaggerizer;
+  let base: string;
+  let admin: string;
+  let plainBase: string;
+  let ignoredBase: string;
+  let tmp: string;
+  let specFile: string;
+  let upstream: http.Server;
+  let forwarded: string[];
+  let handlerCalls = 0;
+
+  before(async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), "swaggerizer-validate-"));
+    specFile = path.join(tmp, "things.json");
+    await fs.writeFile(specFile, JSON.stringify(spec, null, 2));
+    forwarded = [];
+    upstream = http.createServer((req, res) => {
+      forwarded.push(req.url!);
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ real: true }));
+    });
+    await new Promise<void>(resolve => upstream.listen(0, "127.0.0.1", () => resolve()));
+    const upstreamUrl = `http://127.0.0.1:${(upstream.address() as any).port}`;
+
+    sw = createSwaggerizer({
+      silent: true,
+      validate: "enforce",
+      proxy: upstreamUrl,
+      specConfigs: {
+        things: {
+          handlers: {
+            createThing: () => {
+              handlerCalls += 1;
+              return undefined;
+            }
+          }
+        }
+      }
+    });
+    await sw.load(tmp);
+    ({ base } = await startOn(sw));
+    admin = `${base}/swaggerizer`;
+
+    plain = createSwaggerizer({ silent: true });
+    await plain.load(tmp);
+    ({ base: plainBase } = await startOn(plain));
+
+    ignored = createSwaggerizer({ silent: true, validate: "enforce", specConfigs: { things: { validateIgnore: ["POST /legacy"] } } });
+    await ignored.load(tmp);
+    ({ base: ignoredBase } = await startOn(ignored));
+  });
+
+  after(async () => {
+    await sw.close();
+    await plain.close();
+    await ignored.close();
+    upstream.close();
+  });
+
+  const tenant = { "x-tenant": "acme" };
+
+  test("off is the default: nothing is validated and nothing is recorded", async () => {
+    const res = await call(`${plainBase}/things?limit=abc`, { headers: tenant });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("x-swaggerizer-validation"), null);
+    const log = (await call(`${plainBase}/swaggerizer/api/log`)).json.entries;
+    assert.ok(log.every((entry: any) => entry.validation === undefined));
+  });
+
+  test("enforce rejects an invalid query parameter with the issues", async () => {
+    const res = await call(`${base}/things?limit=abc`, { headers: tenant });
+    assert.equal(res.status, 400);
+    assert.equal(res.headers.get("x-swaggerizer-validation"), "failed");
+    assert.equal(res.json.issues[0].location, "query.limit");
+    assert.equal(res.json.operation, "GET /things");
+  });
+
+  test("enforce rejects a missing required header and a non-numeric path parameter", async () => {
+    const header = await call(`${base}/things?limit=1`);
+    assert.equal(header.status, 400);
+    assert.equal(header.json.issues[0].location, "header.x-tenant");
+
+    const path = await call(`${base}/things/abc`, { headers: tenant });
+    assert.equal(path.status, 400);
+    assert.equal(path.json.issues[0].location, "path.id");
+  });
+
+  test("a valid request is served unchanged", async () => {
+    const res = await call(`${base}/things?limit=10`, { headers: tenant });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("x-swaggerizer-validation"), null);
+  });
+
+  test("the header overrides the mode per request, in both directions", async () => {
+    const off = await call(`${base}/things?limit=abc`, { headers: { ...tenant, "x-swaggerizer-validation": "off" } });
+    assert.equal(off.status, 200);
+
+    const warn = await call(`${base}/things?limit=abc`, { headers: { ...tenant, "x-swaggerizer-validation": "warn" } });
+    assert.equal(warn.status, 200);
+    assert.equal(warn.headers.get("x-swaggerizer-validation"), "warning");
+
+    const enforce = await call(`${plainBase}/things?limit=abc`, { headers: { ...tenant, "x-swaggerizer-validation": "enforce" } });
+    assert.equal(enforce.status, 400);
+  });
+
+  test("the live log carries the issues for a warned request", async () => {
+    await call(`${base}/things?limit=abc`, { headers: { ...tenant, "x-swaggerizer-validation": "warn" } });
+    const entries = (await call(`${admin}/api/log`)).json.entries;
+    const entry = entries.slice().reverse().find((item: any) => item.validation && item.status === 200);
+    assert.equal(entry.validation.request[0].location, "query.limit");
+    assert.equal(entry.validation.request[0].keyword, "type");
+  });
+
+  test("an invalid body is rejected before the custom handler runs", async () => {
+    handlerCalls = 0;
+    const missing = await call(`${base}/things`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...tenant },
+      body: JSON.stringify({ count: 2 })
+    });
+    assert.equal(missing.status, 400);
+    assert.equal(missing.json.issues[0].location, "body.name");
+    assert.equal(handlerCalls, 0);
+
+    const valid = await call(`${base}/things`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...tenant },
+      body: JSON.stringify({ name: "Nibbles" })
+    });
+    assert.equal(valid.status, 201);
+    assert.equal(handlerCalls, 1);
+  });
+
+  test("a required body and an unparseable body are reported differently", async () => {
+    const none = await call(`${base}/things`, { method: "POST", headers: tenant });
+    assert.equal(none.status, 400);
+    assert.equal(none.json.issues[0].keyword, "required");
+    assert.equal(none.json.issues[0].location, "body");
+
+    const broken = await call(`${base}/things`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...tenant },
+      body: "{nope"
+    });
+    assert.equal(broken.status, 400);
+    assert.equal(broken.json.issues[0].keyword, "parse");
+  });
+
+  test("an unsupported media type is skipped, not failed", async () => {
+    const res = await call(`${base}/things`, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain", ...tenant },
+      body: "hello"
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.headers.get("x-swaggerizer-validation"), "warning");
+    const entries = (await call(`${admin}/api/log`)).json.entries;
+    const entry = entries.find((item: any) => item.validation && item.validation.skipped);
+    assert.equal(entry.validation.skipped, "unsupported-media-type");
+  });
+
+  test("proxy mode does not forward a request the spec forbids", async () => {
+    forwarded.length = 0;
+    const blocked = await call(`${base}/things/abc`, { headers: { ...tenant, "x-swaggerizer-scenario": "proxy" } });
+    assert.equal(blocked.status, 400);
+    assert.deepEqual(forwarded, []);
+
+    const allowed = await call(`${base}/things/7`, { headers: { ...tenant, "x-swaggerizer-scenario": "proxy" } });
+    assert.equal(allowed.status, 200);
+    assert.deepEqual(forwarded, ["/things/7"]);
+  });
+
+  test("validateIgnore exempts an operation", async () => {
+    const exempt = await call(`${ignoredBase}/legacy`, { method: "POST" });
+    assert.equal(exempt.status, 201);
+    const checked = await call(`${base}/legacy`, { method: "POST" });
+    assert.equal(checked.status, 400);
+  });
+
+  test("unmatched routes keep their 404 and are not validated", async () => {
+    const res = await call(`${base}/nothing/here`, { headers: tenant });
+    assert.equal(res.status, 404);
+    assert.match(res.json.error, /No operation matches/);
+  });
+
+  test("GET /api/validation reports the mode and which operations have schemas", async () => {
+    const res = await call(`${admin}/api/validation`);
+    assert.equal(res.status, 200);
+    assert.equal(res.json.mode, "enforce");
+    const create = res.json.operations.find((op: any) => op.key === "post:/things");
+    assert.equal(create.hasRequestSchema, true);
+  });
+
+  test("reloading rebuilds the compiled schemas", async () => {
+    const before = await call(`${base}/things`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...tenant },
+      body: "{}"
+    });
+    assert.equal(before.status, 400);
+
+    const relaxed = structuredClone(spec);
+    (relaxed.components.schemas.NewThing as any).required = [];
+    await fs.writeFile(specFile, JSON.stringify(relaxed, null, 2));
+    await post(`${admin}/api/reload`, {});
+    const after = await call(`${base}/things`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...tenant },
+      body: "{}"
+    });
+    assert.equal(after.status, 201);
+  });
+});
