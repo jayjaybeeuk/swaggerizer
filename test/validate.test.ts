@@ -194,6 +194,94 @@ describe("request validation", () => {
     assert.equal(validator.hasRequestSchema(operation("get:/things/{id}")), true);
   });
 
+  test("review fixes: parameter styles, overrides, content params and media types", () => {
+    const docR: any = {
+      openapi: "3.0.3",
+      info: { title: "R", version: "1.0.0" },
+      paths: {
+        "/r": {
+          parameters: [{ name: "q", in: "query", required: true, schema: { type: "string" } }],
+          get: {
+            operationId: "r",
+            parameters: [
+              { name: "q", in: "query", schema: { type: "integer" } },
+              { name: "ids", in: "query", explode: false, schema: { type: "array", items: { type: "integer" } } },
+              { name: "pipes", in: "query", style: "pipeDelimited", explode: false, schema: { type: "array", items: { type: "integer" } } },
+              { name: "filter", in: "query", required: true, schema: { type: "object", properties: { a: { type: "string" } } } },
+              { name: "deep", in: "query", style: "deepObject", required: true, schema: { type: "object" } },
+              { name: "j", in: "query", content: { "application/json": { schema: { type: "object", required: ["x"] } } } },
+              { name: "t", in: "query", content: { "text/plain": { schema: { type: "integer" } } } }
+            ],
+            responses: { "200": { description: "ok" } }
+          }
+        },
+        "/upload": {
+          post: {
+            operationId: "upload",
+            requestBody: { required: true, content: { "multipart/form-data": { schema: { type: "object" } } } },
+            responses: { "200": { description: "ok" } }
+          }
+        },
+        "/any": {
+          post: {
+            operationId: "any",
+            requestBody: { content: { "*/*": { schema: { type: "object", required: ["id"] } } } },
+            responses: { "200": { description: "ok" } }
+          }
+        },
+        "/nullable": {
+          post: {
+            operationId: "nullable",
+            requestBody: {
+              content: { "application/json": { schema: { allOf: [{ type: "object" }], nullable: true } } }
+            },
+            responses: { "200": { description: "ok" } }
+          }
+        }
+      }
+    };
+    const opsR = buildCatalogue(docR, "r");
+    const opR = (key: string) => opsR.find(op => op.key === key)!;
+    const vR = createValidator(docR, "r", "3.0.3");
+    const run = (key: string, extra: Partial<ValidationInput>) => vR.validateRequest(opR(key), { ...input(), ...extra });
+
+    // The operation's optional integer `q` replaces the path item's required string `q`.
+    const ok = run("get:/r", { query: new URLSearchParams("ids=1,2&pipes=3|4&deep[a]=1&t=abc") });
+    assert.deepEqual(ok.request, []);
+    assert.equal(ok.skipped, "object-style");
+    assert.equal(run("get:/r", { query: new URLSearchParams("q=x&deep[a]=1") }).request[0].location, "query.q");
+
+    // Non-exploded arrays are split before their items are checked.
+    assert.equal(run("get:/r", { query: new URLSearchParams("ids=1,x&deep[a]=1") }).request[0].location, "query.ids.1");
+
+    // A required deepObject with no `deep[...]` key is still missing.
+    const noDeep = run("get:/r", { query: new URLSearchParams("") });
+    assert.deepEqual(noDeep.request.map(issue => issue.location), ["query.deep"]);
+
+    // JSON `content` parameters are parsed, not split.
+    assert.deepEqual(run("get:/r", { query: new URLSearchParams('j={"x":1}&deep[a]=1') }).request, []);
+    assert.equal(run("get:/r", { query: new URLSearchParams('j={"y":1}&deep[a]=1') }).request[0].location, "query.j.x");
+    assert.equal(run("get:/r", { query: new URLSearchParams("j={nope&deep[a]=1") }).request[0].keyword, "parse");
+
+    // Multipart and text bodies are skipped, even though they are not JSON.
+    const multipart = run("post:/upload", {
+      bodyError: "Request body is not valid JSON.",
+      contentType: "multipart/form-data; boundary=x"
+    });
+    assert.deepEqual(multipart.request, []);
+    assert.equal(multipart.skipped, "unsupported-media-type");
+    const text = run("post:/any", { bodyError: "Request body is not valid JSON.", contentType: "text/plain" });
+    assert.deepEqual(text.request, []);
+    assert.equal(text.skipped, "unsupported-media-type");
+    assert.equal(run("post:/any", { body: {}, contentType: "application/json" }).request[0].location, "body.id");
+
+    // Inline `nullable` without `type` compiles, like the same schema under components.
+    const nullBody = run("post:/nullable", { body: null, contentType: "application/json" });
+    assert.deepEqual(nullBody.request, []);
+    assert.equal(nullBody.skipped, undefined);
+    assert.equal(run("post:/nullable", { body: "nope", contentType: "application/json" }).request[0].keyword, "type");
+  });
+
   test("formats issues and understands the config surface", () => {
     assert.equal(
       formatIssues([{ location: "query.limit", message: "must be integer" }]),

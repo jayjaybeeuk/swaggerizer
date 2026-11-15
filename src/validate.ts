@@ -50,6 +50,8 @@ interface ParamPlan {
   style: string;
   explode: boolean;
   schema: any;
+  /** Declared through `content` with a JSON media type: the raw value is JSON text. */
+  json: boolean;
   validate?: ValidateFn;
   problem?: string;
 }
@@ -127,11 +129,36 @@ function headerValue(headers: ValidationInput["headers"], name: string): string 
 
 /* ------------------------------------------------------------------ parameters */
 
+/** Delimiter of a non-exploded array: `form` is comma-separated, the others say so in their name. */
+function arrayDelimiter(style: string): string {
+  if (style === "spaceDelimited") return " ";
+  if (style === "pipeDelimited") return "|";
+  return ",";
+}
+
+/**
+ * Exploded `form` objects arrive as their own top-level keys (`?a=1&b=2`) and `deepObject` as
+ * `name[key]=…`. Neither is rebuilt here, so such parameters are reported as skipped, not failed.
+ */
+function isSpreadObject(param: ParamPlan, type: string | undefined): boolean {
+  return (
+    !param.json &&
+    type === "object" &&
+    (param.in === "query" || param.in === "cookie") &&
+    ((param.style === "form" && param.explode) || param.style === "deepObject")
+  );
+}
+
+function hasDeepObjectKeys(query: URLSearchParams, name: string): boolean {
+  for (const key of query.keys()) if (key.startsWith(`${name}[`)) return true;
+  return false;
+}
+
 /** The value a parameter arrived as: repeated query keys for arrays, the last cookie for scalars. */
 function rawParam(param: ParamPlan, input: ValidationInput, type: string | undefined): string | string[] | undefined {
   if (param.in === "path") return input.params[param.name];
   if (param.in === "query") {
-    if (type === "array") return input.query.getAll(param.name);
+    if (type === "array" && !param.json) return input.query.getAll(param.name);
     return input.query.get(param.name) ?? undefined;
   }
   if (param.in === "header") return headerValue(input.headers, param.name);
@@ -165,12 +192,19 @@ function coerceParam(doc: any, param: ParamPlan, raw: string | string[], summary
   const { node: schema } = deref(doc, param.schema);
   const type = typeOf(schema);
   if (type === "array") {
-    const values = Array.isArray(raw) ? raw : String(raw).split(",").map(part => part.trim()).filter(part => part !== "");
+    // Repeated keys (`ids=1&ids=2`) are already separate; a non-exploded value (`ids=1,2`) is split.
+    const split = (value: string, delimiter: string) =>
+      value.split(delimiter).map(part => part.trim()).filter(part => part !== "");
+    const values = Array.isArray(raw)
+      ? param.explode
+        ? raw
+        : raw.flatMap(value => split(value, arrayDelimiter(param.style)))
+      : split(String(raw), ",");
     return values.map(value => coerceScalar(doc, value, schema?.items));
   }
   if (type === "object") {
     if (Array.isArray(raw)) return raw;
-    if (param.explode && (param.style === "form" || param.style === "deepObject")) {
+    if (isSpreadObject(param, type)) {
       summary.skipped ??= "object-style";
       return SKIP;
     }
@@ -235,6 +269,28 @@ export function matchMediaType(declared: string[], actual: string | undefined): 
   }
   const wildcard = types.find(entry => entry.type === "*/*" || entry.type === "application/*");
   return wildcard?.key;
+}
+
+const FORM_TYPE = "application/x-www-form-urlencoded";
+
+/**
+ * Bodies the server can parse: JSON (`+json` included) and urlencoded forms. No `Content-Type` means
+ * JSON, as it always has. Multipart, octet-stream, text… are skipped rather than failed to parse.
+ */
+function readableMediaType(actual: string | undefined): boolean {
+  if (!actual) return true;
+  return actual === "application/json" || actual.endsWith("+json") || actual === FORM_TYPE;
+}
+
+/** True when the operation (or its path item) declares any parameter or a request body. */
+export function hasRequestSchema(doc: any, op: Pick<CatalogueOperation, "route" | "method">): boolean {
+  const item = doc?.paths?.[op.route];
+  const node = item?.[op.method];
+  return Boolean(
+    (Array.isArray(item?.parameters) && item.parameters.length > 0) ||
+      (Array.isArray(node?.parameters) && node.parameters.length > 0) ||
+      node?.requestBody
+  );
 }
 
 /* ------------------------------------------------------------------ issues */
@@ -320,7 +376,8 @@ export function createValidator(doc: any, specId: string, specVersion?: string):
 
   function compile(schema: any): ValidateFn | undefined {
     try {
-      return ajv.compile(withBaseRefs(schema, base)) as ValidateFn;
+      // Inline operation schemas get the same `nullable` rewrite as the registered document.
+      return ajv.compile(withBaseRefs(withoutNullable(schema), base)) as ValidateFn;
     } catch {
       return undefined;
     }
@@ -330,21 +387,30 @@ export function createValidator(doc: any, specId: string, specVersion?: string):
     const item = doc?.paths?.[op.route];
     const node = item?.[op.method];
     const plan: OperationPlan = { params: [] };
-    const declared = [
+    // An operation-level parameter replaces a path-level one with the same name and location.
+    const declared = new Map<string, any>();
+    for (const entry of [
       ...(Array.isArray(item?.parameters) ? item.parameters : []),
       ...(Array.isArray(node?.parameters) ? node.parameters : [])
-    ];
-    for (const entry of declared) {
+    ]) {
       const { node: param } = deref(doc, entry);
       if (!param || typeof param !== "object" || !param.name || typeof param.in !== "string") continue;
+      const name = param.in === "header" ? String(param.name).toLowerCase() : String(param.name);
+      declared.set(`${param.in}\u0000${name}`, param);
+    }
+    for (const param of declared.values()) {
       if (!PARAM_LOCATIONS.has(param.in)) continue;
       const where = param.in as ParamLocation;
       if (where === "header" && IGNORED_HEADER_PARAMS.has(String(param.name).toLowerCase())) continue;
       let schema = param.schema;
+      let json = false;
       if (!schema && param.content && typeof param.content === "object") {
-        const keys = Object.keys(param.content);
-        const json = keys.find(key => /json/i.test(key));
-        if (keys.length === 1 || json) schema = param.content[json ?? keys[0]]?.schema;
+        // Only a JSON `content` parameter can be read; any other media type is left unchecked.
+        const key = Object.keys(param.content).find(entry => /^application\/(.+\+)?json\b/i.test(entry.trim()));
+        if (key) {
+          schema = param.content[key]?.schema;
+          json = true;
+        }
       }
       if (!schema) continue;
       const style =
@@ -357,6 +423,7 @@ export function createValidator(doc: any, specId: string, specVersion?: string):
         style,
         explode: typeof param.explode === "boolean" ? param.explode : style === "form",
         schema,
+        json,
         ...(compiled ? { validate: compiled } : { problem: "invalid-schema" })
       });
     }
@@ -391,7 +458,23 @@ export function createValidator(doc: any, specId: string, specVersion?: string):
 
     for (const param of plan.params) {
       const { node: schema } = deref(doc, param.schema);
-      const raw = rawParam(param, input, typeOf(schema));
+      const type = typeOf(schema);
+      if (isSpreadObject(param, type)) {
+        // `deepObject` keys can at least be seen; exploded form objects cannot be told from other keys.
+        const deep = param.style === "deepObject" && param.in === "query";
+        const present = deep && hasDeepObjectKeys(input.query, param.name);
+        if (deep && !present && param.required) {
+          add(summary, {
+            location: `${param.in}.${param.name}`,
+            message: `must have required parameter '${param.name}'`,
+            keyword: "required"
+          });
+        } else if (present || param.required) {
+          summary.skipped ??= "object-style";
+        }
+        continue;
+      }
+      const raw = rawParam(param, input, type);
       const missing = raw === undefined || (Array.isArray(raw) ? raw.length === 0 : raw === "");
       if (missing) {
         if (param.required) {
@@ -407,7 +490,18 @@ export function createValidator(doc: any, specId: string, specVersion?: string):
         summary.skipped ??= param.problem;
         continue;
       }
-      const value = coerceParam(doc, param, raw as string | string[], summary);
+      let value: unknown;
+      if (param.json) {
+        const text = Array.isArray(raw) ? raw[raw.length - 1] : String(raw);
+        try {
+          value = JSON.parse(text);
+        } catch {
+          add(summary, { location: `${param.in}.${param.name}`, message: "must be valid JSON", keyword: "parse" });
+          continue;
+        }
+      } else {
+        value = coerceParam(doc, param, raw as string | string[], summary);
+      }
       if (value === SKIP) continue;
       for (const error of runCheck(param.validate, value)) {
         add(summary, issueFromError(error, `${param.in}.${param.name}`));
@@ -415,8 +509,9 @@ export function createValidator(doc: any, specId: string, specVersion?: string):
     }
 
     if (plan.body) {
-      const mediaKey = matchMediaType(Object.keys(plan.body.content), normaliseContentType(input.contentType));
-      if (!mediaKey) {
+      const actual = normaliseContentType(input.contentType);
+      const mediaKey = matchMediaType(Object.keys(plan.body.content), actual);
+      if (!mediaKey || !readableMediaType(actual)) {
         summary.skipped ??= "unsupported-media-type";
       } else if (input.bodyError) {
         add(summary, { location: "body", message: input.bodyError, keyword: "parse" });
@@ -426,11 +521,13 @@ export function createValidator(doc: any, specId: string, specVersion?: string):
         }
       } else {
         const schema = plan.body.content[mediaKey]?.schema;
-        if (schema) {
-          const value = /x-www-form-urlencoded/i.test(mediaKey)
-            ? coerceForm(doc, input.body, schema, summary)
-            : input.body;
-          for (const error of runCheck(bodyCheck(op, mediaKey, schema), value)) {
+        const check = schema ? bodyCheck(op, mediaKey, schema) : undefined;
+        if (schema && !check) {
+          summary.skipped ??= "invalid-schema";
+        } else if (check) {
+          const form = (actual ?? mediaKey.split(";")[0].trim().toLowerCase()) === FORM_TYPE;
+          const value = form ? coerceForm(doc, input.body, schema, summary) : input.body;
+          for (const error of runCheck(check, value)) {
             add(summary, issueFromError(error, "body"));
           }
         }
@@ -440,15 +537,5 @@ export function createValidator(doc: any, specId: string, specVersion?: string):
     return summary;
   }
 
-  function hasRequestSchema(op: CatalogueOperation): boolean {
-    const item = doc?.paths?.[op.route];
-    const node = item?.[op.method];
-    return Boolean(
-      (Array.isArray(item?.parameters) && item.parameters.length > 0) ||
-        (Array.isArray(node?.parameters) && node.parameters.length > 0) ||
-        node?.requestBody
-    );
-  }
-
-  return { validateRequest, hasRequestSchema };
+  return { validateRequest, hasRequestSchema: op => hasRequestSchema(doc, op) };
 }

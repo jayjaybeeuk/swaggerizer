@@ -19,6 +19,7 @@ import {
 import { analyseSpecFile, listSpecFiles, specIdFor, type AnalysedSpec } from "./spec";
 import {
   createValidator,
+  hasRequestSchema,
   matchesIgnore,
   parseValidationMode,
   unmatchedIgnore,
@@ -237,7 +238,8 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
       perSpec,
       operations: operations.map(op => {
         const spec = specs.get(op.specId);
-        return { specId: op.specId, key: op.key, hasRequestSchema: spec ? validatorFor(spec).hasRequestSchema(op) : false };
+        // Read straight from the document: reporting this must not build an Ajv instance while validation is off.
+        return { specId: op.specId, key: op.key, hasRequestSchema: spec ? hasRequestSchema(spec.doc, op) : false };
       })
     };
   }
@@ -579,7 +581,8 @@ export function createSwaggerizer(options: SwaggerizerOptions = {}): Swaggerizer
 
     let validationBody: unknown;
     let bodyError: string | undefined;
-    if (mode !== "off" && buffered && buffered.length > 0) {
+    // A whitespace-only body is no body, for validation as for the handler.
+    if (mode !== "off" && buffered && buffered.toString("utf8").trim() !== "") {
       try {
         validationBody = parseRequestBody(buffered, contentType);
       } catch (err: any) {

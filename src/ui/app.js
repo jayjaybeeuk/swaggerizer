@@ -273,12 +273,19 @@
     var active = ops.filter(function (o) { return o.active; });
     var changed = active.filter(function (o) { return o.modified; }).length;
     var breaking = (ui.data.changes || []).reduce(function (n, r) { return n + r.counts.breaking; }, 0);
-    var mode = (ui.data.validation && ui.data.validation.mode) || "off";
+    var validation = ui.data.validation || {};
+    var mode = validation.mode || "off";
+    var perSpec = validation.perSpec || {};
+    var specModes = Object.keys(perSpec).map(function (id) { return perSpec[id]; }).filter(function (m) { return m !== mode; });
+    // Shown only when something is checked; specs that differ from the server mode are listed after it.
+    var showMode = mode !== "off" || specModes.some(function (m) { return m !== "off"; });
+    var modeTitle = "Requests are checked against the spec: off, warn or enforce" +
+      Object.keys(perSpec).map(function (id) { return "\n" + id + ": " + perSpec[id]; }).join("");
     el.stats.replaceChildren(
       h("span", null, h("strong", { text: String(enabled) }), " / " + specs.length + " specs on"),
       h("span", null, h("strong", { text: String(active.length) }), " endpoints served"),
       h("span", null, h("strong", { text: String(changed) }), " switched"),
-      h("span", { title: "Requests are checked against the spec: off, warn or enforce" }, "validation ", h("strong", { text: mode })),
+      showMode ? h("span", { title: modeTitle }, "validation ", h("strong", { text: mode + (specModes.length ? " +" + specModes.length : "") })) : null,
       breaking ? h("span", { class: "status-5" }, h("strong", { text: String(breaking) }), " breaking change" + (breaking === 1 ? "" : "s")) : null
     );
   }

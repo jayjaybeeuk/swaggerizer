@@ -100,7 +100,7 @@ X-Swaggerizer-Validation: off | warn | enforce
 
 Resolution order, first match wins:
 
-1. `X-Swaggerizer-Validation` header (unknown values are ignored with a warning in the log entry).
+1. `X-Swaggerizer-Validation` header (unknown values are ignored and fall through to the next rule).
 2. `specs[id].validateIgnore` → `off`.
 3. `specs[id].validate`.
 4. top-level `validate` / `--validate`.
@@ -162,10 +162,10 @@ path strings, parsed JSON).
 | `integer`, `number` | string | `Number(value)` when it matches `^[+-]?(\d+(\.\d+)?\|\.\d+)([eE][+-]?\d+)?$`, otherwise left as-is so the schema reports `type` |
 | `boolean` | string | `"true"` → `true`, `"false"` → `false`, otherwise left as-is |
 | `array` | `explode: true` | `URLSearchParams.getAll()` (repeated keys) |
-| `array` | `explode: false` | split on `,` |
+| `array` | `explode: false` | split on `,` (`spaceDelimited`: space, `pipeDelimited`: `\|`) |
 | `array` | header/path | split on `,` |
 | `object` | `explode: false` | split on `,`, then on the first `:` |
-| `object` | `explode: true` (query) | repeated keys are **not** rebuilt into an object — reported as `skipped: "object-style"` |
+| `object` | `explode: true` (query), `deepObject` | keys are **not** rebuilt into an object — reported as `skipped: "object-style"` (a required `deepObject` with no `name[…]` key is still `required`) |
 
 `coerceTypes` stays `false` in Ajv: coercion is ours, explicit, and never mutates the request or the
 schema. `useDefaults` stays `false` — a mock must not invent values and then echo them as if the
@@ -214,7 +214,7 @@ send a request the contract forbids.
 
   export interface ValidationSummary {
     request: ValidationIssue[];
-    /** Why a check did not run: "unsupported-media-type", "object-style", "form-nesting", "no-schema". */
+    /** Why a check did not run: "unsupported-media-type", "object-style", "form-nesting", "invalid-schema". */
     skipped?: string;
   }
   ```
@@ -321,8 +321,8 @@ allowUnionTypes: true, validateFormats: true }`, plus `addFormats()`.
 | `openapi: 3.1.x` | `ajv/dist/2020` | 3.1 is JSON Schema 2020-12; `exclusiveMinimum` is numeric, and draft-07 would misread it |
 
 `createValidator()` picks the instance from `specVersion` (already on `AnalysedSpec`). A 3.1-only
-keyword that the 2020-12 instance does not implement (`$dynamicRef`) is reported as
-`skipped: "unsupported-keyword"` rather than a false failure.
+keyword that the 2020-12 instance cannot compile (`$dynamicRef`) is reported as
+`skipped: "invalid-schema"` rather than a false failure.
 
 ### Body handling (the one real refactor)
 
