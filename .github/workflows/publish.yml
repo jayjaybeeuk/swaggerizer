@@ -1,9 +1,20 @@
 name: Release
 
-# Manual until npm trusted publishing is configured for the `swaggerizer` package.
-# Once it is, add `push: branches: [main]` here to release on every merge (as ramlizer does).
+# Releases on every merge to main (as ramlizer does). semantic-release picks the version from
+# conventional commits (feat → minor, fix → patch, BREAKING CHANGE → major) and publishes to npm
+# with trusted publishing (OIDC), so no npm token is stored here.
+#
+# main is protected (PRs only), so nothing is committed back: the version lives in the git tag,
+# on npm and in the GitHub Release notes. package.json stays at 0.0.0-development.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
+
+# One release at a time; a queued run picks up every commit merged meanwhile.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   test:
