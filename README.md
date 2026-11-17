@@ -1,6 +1,17 @@
 # swaggerizer
 
-It's a strategizer for OpenAPI and Swagger, the sibling of [ramlizer](https://github.com/jayjaybeeuk/ramlizer).
+Turn an OpenAPI or Swagger spec into a mock API whose responses you can switch while it runs, plus a typed client and MSW mocks for your frontend. It's the OpenAPI sibling of [ramlizer](https://github.com/jayjaybeeuk/ramlizer).
+
+**New here?** Start with [Your first five minutes](#your-first-five-minutes): one small spec, one command, and every feature you'll use day to day.
+
+#### Contents
+
+- [What?](#what) · [Why?](#why)
+- [Install](#install) · [Your first five minutes](#your-first-five-minutes) · [Quick start](#quick-start)
+- [Scenarios](#scenarios) · [The admin page](#the-admin-page) · [Generated code](#generated-code) · [Config file](#config-file)
+- [Contract-change warnings](#contract-change-warnings) · [Request validation](#request-validation)
+- Reference: [CLI](#cli) · [Request headers](#request-headers) · [Admin API](#admin-api) · [Programmatic use](#programmatic-use) · [Spec support](#spec-support)
+- [Trying the bundled examples](#trying-the-bundled-examples)
 
 ## What?
 
@@ -17,11 +28,103 @@ Your UI behaves differently depending on what the API returns: an empty list, a 
 
 You also regenerate client code whenever the backend team updates the spec. Swaggerizer warns you that an endpoint was removed, a field became required or an `operationId` was renamed (which renames your generated function) *before* the change lands in your code.
 
-## Quick start
+## Install
+
+You need Node.js 20 or later.
 
 ```bash
-npm install --save-dev swaggerizer msw @faker-js/faker
+npm install --save-dev swaggerizer
+```
 
+That's enough for the mock server (`serve`), `diff` and `pull`. If you'll use `generate`, also add [MSW](https://mswjs.io) and [faker](https://fakerjs.dev), because the code it writes imports them:
+
+```bash
+npm install --save-dev msw @faker-js/faker
+```
+
+`generate --no-mock` skips orval's faker data, so faker isn't needed then. The Swaggerizer wrapper it writes still imports `msw`.
+
+## Your first five minutes
+
+Save this as `specs/pets.yaml`. It's one endpoint with three possible answers: two named examples for `200`, and a `500`.
+
+```yaml
+openapi: 3.0.3
+info: { title: Pets, version: 1.0.0 }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, maximum: 100 } }
+      responses:
+        "200":
+          description: The pets
+          content:
+            application/json:
+              examples:
+                twoPets: { value: [{ id: 1, name: Rex }, { id: 2, name: Tibbles }] }
+                noPets: { value: [] }
+        "500":
+          description: Server error
+          content:
+            application/json:
+              example: { message: Something went wrong }
+```
+
+**1. Start the mock.**
+
+```bash
+npx swaggerizer serve --folder ./specs --port 8080
+```
+
+```
+[swaggerizer] Loaded pets.yaml (3.0.3) – 1 operation(s)
+[swaggerizer] Mock API on http://localhost:8080
+[swaggerizer] Admin page at http://localhost:8080/swaggerizer/
+```
+
+**2. Call it.** The first example in the spec is the default:
+
+```bash
+curl http://localhost:8080/pets
+# [{"id":1,"name":"Rex"},{"id":2,"name":"Tibbles"}]
+```
+
+**3. Switch the response.** Open http://localhost:8080/swaggerizer/ and pick `noPets` under `GET /pets`, or do the same from a script:
+
+```bash
+curl 'http://localhost:8080/swaggerizer/api/select?method=get&route=/pets&example=noPets'
+curl http://localhost:8080/pets
+# []
+```
+
+Every client of the mock now gets the empty list, until you switch back or press **Reset all** in the admin page.
+
+**4. Override a single request.** Tests that run in parallel shouldn't change what everyone else sees, so they can send a header instead:
+
+```bash
+curl -H 'X-Swaggerizer-Scenario: 500' http://localhost:8080/pets
+# {"message":"Something went wrong"}
+```
+
+**5. Catch a request the spec forbids.** The spec says `limit` is an integer:
+
+```bash
+curl -H 'X-Swaggerizer-Validation: enforce' 'http://localhost:8080/pets?limit=abc'
+# {"error":"Request validation failed","operation":"GET /pets","specId":"pets",
+#  "issues":[{"location":"query.limit","message":"must be integer","keyword":"type"}]}
+```
+
+Start the server with `--validate warn` or `--validate enforce` to check every request this way. See [Request validation](#request-validation).
+
+From here, [Generated code](#generated-code) shows how to get a typed client and MSW mocks that follow the same scenarios, and [Config file](#config-file) is the place for anything you'd otherwise repeat on the command line.
+
+## Quick start
+
+The three commands most projects use:
+
+```bash
 # 1. Serve live mocks with an admin page
 npx swaggerizer serve --folder ./specs --port 8080
 #    → mock API on http://localhost:8080, admin page on http://localhost:8080/swaggerizer/
@@ -40,14 +143,7 @@ npx swaggerizer serve --folder http://localhost:8081/v3/api-docs
 npx swaggerizer generate --folder https://api.example.com/swagger.json -H "Authorization: Bearer $TOKEN" --output ./src/api
 ```
 
-You can try it on the bundled examples:
-
-```bash
-npm install && npm run build
-npm run example            # serve ./example_specs, compared against ./example_generated
-npm run example:diff       # what would change if ./example_specs_next were adopted
-npm run example:browser    # orval client + MSW + debug menu demo on http://localhost:5173
-```
+To see a bigger setup with several specs, a browser demo and contract changes, see [Trying the bundled examples](#trying-the-bundled-examples).
 
 ## Scenarios
 
@@ -326,7 +422,28 @@ export default defineConfig({
 });
 ```
 
-`GET {endpoint}/api/validation` reports the active mode and which operations declare something to check. Responses are not validated: the mock serves bodies taken from the spec itself.
+Under `enforce`, a rejected request gets this body, with up to 20 issues:
+
+```json
+{
+  "error": "Request validation failed",
+  "operation": "GET /pets",
+  "specId": "pets",
+  "issues": [{ "location": "query.limit", "message": "must be integer", "keyword": "type" }]
+}
+```
+
+The mode is chosen in this order, and the first match wins:
+
+1. The `X-Swaggerizer-Validation` header on the request.
+2. `validateIgnore` for the spec, which means `off`.
+3. `validate` for the spec.
+4. The top-level `validate`, or `--validate`.
+5. `off`.
+
+`GET /swaggerizer/api/validation` reports the active mode and which operations declare something to check. Responses are not validated: the mock serves bodies taken from the spec itself.
+
+The [design notes](https://github.com/jayjaybeeuk/swaggerizer/blob/main/docs/request-validation.md) cover how parameters are decoded and coerced, and which cases are skipped rather than failed.
 
 ## CLI
 
@@ -343,6 +460,20 @@ swaggerizer pull      [ids…] [--config <file>] [-H 'Name: value'] [--verbose]
 
 `serve` is the default command, so `swaggerizer --folder ./specs` works like `ramlizer --folder`. A folder is scanned for `.yaml`, `.yml` and `.json` files that contain an `openapi` or `swagger` key. `--folder` also accepts URLs (see [Hosted specs](#hosted-specs)), and it's optional when a config file declares the specs.
 
+## Request headers
+
+Headers you can send to the mock with any request, and the headers it sends back:
+
+| Header | Direction | Values | Effect |
+| --- | --- | --- | --- |
+| `X-Swaggerizer-Scenario` | request | `404`, `400:badSpecies`, `emptyList`, `proxy` | Serve this response for this request only (see [One request at a time](#one-request-at-a-time)) |
+| `X-Swaggerizer-Validation` | request | `off`, `warn`, `enforce` | Validation mode for this request only. Unknown values are ignored |
+| `X-Swaggerizer-Scenario` | response | `200:twoPets` | The code and example that were served |
+| `X-Swaggerizer-Validation` | response | `warning`, `failed` | The request didn't fit the spec, or wasn't fully checked (`warning`), or was rejected (`failed`) |
+| `X-Swaggerizer-Proxied` | response | upstream URL | The response came from the real API |
+
+None of these request headers are forwarded to the real API in proxy mode. Browsers can read the response headers, because they are listed in `Access-Control-Expose-Headers`.
+
 ## Admin API
 
 All routes live under `/swaggerizer` (change the path with `--endpoint`).
@@ -357,6 +488,7 @@ All routes live under `/swaggerizer` (change the path with `--endpoint`).
 | `GET` | `/api/changes` | – | Contract-change reports |
 | `GET` | `/api/log?since=<id>` | – | Requests received after `id` |
 | `POST` | `/api/log` | entry or array | Lets MSW report requests it answered |
+| `GET` | `/api/validation` | – | Validation mode, per-spec overrides, and which operations declare parameters or a body |
 | `GET` | `/api/openapi/<id>.json` | – | The spec as OpenAPI 3 JSON (Swagger 2 is converted), e.g. as an orval input |
 | `POST` | `/swaggerizer` | ramlizer body | ramlizer-compatible switch |
 
@@ -365,12 +497,13 @@ All routes live under `/swaggerizer` (change the path with `--endpoint`).
 ```ts
 import { createSwaggerizer, generate, checkChanges, formatReport } from "swaggerizer";
 
-const sw = createSwaggerizer({ stateFile: ".swaggerizer/state.json" });
+const sw = createSwaggerizer({ stateFile: ".swaggerizer/state.json", validate: "enforce" });
 await sw.load("./specs");
-await sw.listen(8080);
 sw.select({ method: "get", route: "/pets", code: "500" });
 
-// or mount sw.handler in Express / Connect alongside your dev server
+// Either run it on its own port…
+await sw.listen(8080);
+// …or mount it in an existing Express / Connect app (`app`) instead.
 app.use(sw.handler);
 
 const { reports } = await checkChanges("./specs", "./src/api");
@@ -385,3 +518,16 @@ reports.forEach(r => console.log(formatReport(r)));
 - `allOf`, `oneOf` and `anyOf`, nullable types (3.0 `nullable` and 3.1 type arrays), enums, `const`, formats, and `default` / `2XX` responses.
 - Requests are matched with or without the base path from `servers` and through any configured aliases. Static routes beat templated ones (`/users/me` before `/users/{id}`).
 - Wildcard media types such as springdoc's `*/*` are served as `application/json`.
+
+## Trying the bundled examples
+
+The repository has example specs, generated code and a browser demo. They aren't part of the npm package, so clone the repository to run them:
+
+```bash
+git clone https://github.com/jayjaybeeuk/swaggerizer.git
+cd swaggerizer
+npm install && npm run build
+npm run example            # serve ./example_specs, compared against ./example_generated
+npm run example:diff       # what would change if ./example_specs_next were adopted
+npm run example:browser    # orval client + MSW + debug menu demo on http://localhost:5173
+```
